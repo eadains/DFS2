@@ -12,6 +12,8 @@ def opp_pitcher(x):
     series = slate.loc[
         (slate["Team"] == x["Opponent"]) & (slate["Position"] == "P"), "Player"
     ]
+    print(x)
+    print(series)
     if len(series) > 1:
         raise ValueError("Multiple Opposing Pitchers identified. Data Issues.")
     else:
@@ -50,6 +52,8 @@ slate = slate.merge(
 slate = slate.drop(
     slate.loc[(slate["Position"] == "P") & (slate["Probable Pitcher"].isna()), :].index
 )
+# Drop players from postponed games
+slate = slate.drop(slate[slate["Injury Details"] == "Postponed"].index)
 # BIG ASSUMPTION: assume player fills only first position listed.
 # Because of the UTIL slot, I assume this has only minimal impact
 # upon optimality
