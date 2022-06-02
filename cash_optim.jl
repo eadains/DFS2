@@ -27,7 +27,7 @@ positions_min = Dict(
     "OF" => 3
 )
 
-model = Model(SCIP.Optimizer)
+model = Model(optimizer_with_attributes(SCIP.Optimizer, "display/verblevel" => 0))
 
 # Players selected
 @variable(model, x[players.Name], binary = true)
@@ -70,6 +70,7 @@ end
 @objective(model, Max, sum(player.Projection * x[player.Name] for player in eachrow(players)))
 
 optimize!(model)
+println(termination_status(model))
 
 println("Projected Points: $(objective_value(model))")
 println("Roster:")

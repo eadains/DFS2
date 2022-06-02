@@ -12,8 +12,8 @@ def opp_pitcher(x):
     series = slate.loc[
         (slate["Team"] == x["Opponent"]) & (slate["Position"] == "P"), "Player"
     ]
-    print(x)
-    print(series)
+    if len(series) == 0:
+        return np.nan
     if len(series) > 1:
         raise ValueError("Multiple Opposing Pitchers identified. Data Issues.")
     else:
@@ -73,6 +73,7 @@ slate = slate[slate["Proj"] > 0]
 slate = slate[
     [
         "Player",
+        "Id",
         "Position",
         "Salary",
         "Game",
@@ -85,6 +86,7 @@ slate = slate[
 ]
 slate.columns = [
     "Name",
+    "ID",
     "Position",
     "Salary",
     "Game",
