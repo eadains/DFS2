@@ -2,7 +2,7 @@ using JuMP
 using DataFrames
 using CSV
 using Dates
-using SCIP
+using GLPK
 
 # Need a struct container to index the variable w specified below
 struct Stack
@@ -49,7 +49,7 @@ function do_optim(players, past_lineups)
         "OF" => 3
     )
 
-    model = Model(optimizer_with_attributes(SCIP.Optimizer, "display/verblevel" => 0))
+    model = Model(GLPK.Optimizer)
 
     # Players selected
     @variable(model, x[players.Name], binary = true)
@@ -161,7 +161,7 @@ for lineup in past_lineups
 end
 
 # Print lineups to CSV in FanDuel format
-open("./tourny_lineups.csv", "a") do file
+open("./tourny_lineups.csv", "w") do file
     println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
     for lineup in lineups
         println(file, "$(lineup["P"]),$(lineup["C/1B"]),$(lineup["2B"]),$(lineup["3B"]),$(lineup["SS"]),$(lineup["OF1"]),$(lineup["OF2"]),$(lineup["OF3"]),$(lineup["UTIL"])")

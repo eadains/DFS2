@@ -2,7 +2,7 @@ using JuMP
 using DataFrames
 using CSV
 using Dates
-using SCIP
+using GLPK
 
 players = DataFrame(CSV.File("./data/slate_$(Dates.today()).csv"))
 games = unique(players.Game)
@@ -27,7 +27,7 @@ positions_min = Dict(
     "OF" => 3
 )
 
-model = Model(optimizer_with_attributes(SCIP.Optimizer, "display/verblevel" => 0))
+model = Model(GLPK.Optimizer)
 
 # Players selected
 @variable(model, x[players.Name], binary = true)

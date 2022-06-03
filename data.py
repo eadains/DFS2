@@ -42,10 +42,7 @@ proj = proj.dropna()
 
 # Merge projections with slated players
 slate = slate.merge(
-    proj,
-    left_on=["Nickname", "Position", "Salary"],
-    right_on=["Player", "Pos", "Salary"],
-    how="left",
+    proj, left_on=["Nickname", "Salary"], right_on=["Player", "Salary"], how="left",
 )
 
 # Drop all pitchers that are not starting
