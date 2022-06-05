@@ -15,21 +15,7 @@ function do_optim(players, past_lineups)
     positions = unique(players.Position)
     pitchers = players[players.Position.=="P", :ID]
     # Maximum overlap parameter between current lineup and all past lineups
-    overlap = 5
-
-    # Generate batting order stacks.
-    stack_orders = [[1, 2, 3, 4], [2, 3, 4, 5]]
-    stacks = Stack[]
-    # For each team, find players with consectuvive batting orders
-    for team in teams
-        for order in stack_orders
-            stack_players = players[(players.Team.==team).*(in.(players.Order, Ref(order))), :ID]
-            # Sometimes batting orders are 0's
-            if length(stack_players) > 0
-                push!(stacks, Stack(stack_players))
-            end
-        end
-    end
+    overlap = 3
 
     positions_max = Dict(
         "P" => 1,
@@ -57,8 +43,8 @@ function do_optim(players, past_lineups)
     @variable(model, y[teams], binary = true)
     # Teams selected
     @variable(model, z[games], binary = true)
-    # Stacks selected
-    @variable(model, w[stacks], binary = true)
+    # Team stack constraint
+    @variable(model, w[teams], binary = true)
 
     # Total salary of selected players must be <= $35,000
     @constraint(model, sum(player.Salary * x[player.ID] for player in eachrow(players)) <= 35000)
@@ -76,12 +62,16 @@ function do_optim(players, past_lineups)
 
     for team in teams
         # Excluding the pitcher, we can select a maximum of 4 players per team
-        # @constraint(model, sum(x[player.ID] for player in eachrow(players) if player.Team == team && player.Position != "P") <= 4)
+        @constraint(model, sum(x[player.ID] for player in eachrow(players) if player.Team == team && player.Position != "P") <= 4)
         # If no players are selected from a team, y is set to 0
         @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(players) if player.Team == team))
+        # If less than 4 players, excluding the pitcher, are selected from a team, w is set to 0
+        @constraint(model, 4w[team] <= sum(x[player.ID] for player in eachrow(players) if player.Team == team && player.Position != "P"))
     end
     # Must have players from at least 3 teams
     @constraint(model, sum(y) >= 3)
+    # Must select at least 2 team stacks
+    @constraint(model, sum(w) >= 2)
 
     for game in games
         # If no players are selected from a game z is set to 0
@@ -96,12 +86,6 @@ function do_optim(players, past_lineups)
         # Ignore rows where opposing pitcher is missing (this row is usually the pitcher of the team)
         @constraint(model, sum(x[player.ID] for player in eachrow(players) if !ismissing(player.Opp_Pitcher) && (player.Opp_Pitcher == pitcher)) <= 9(1 - x[pitcher]))
     end
-
-    for stack in stacks
-        @constraint(model, 4w[stack] <= sum(x[player.ID] for player in eachrow(players) if player.ID in stack.players))
-    end
-    # Must select 2 4-man stacks
-    @constraint(model, sum(w) >= 2)
 
     # If any past lineups have been selected, make sure the current lineup doesn't overlap
     if length(past_lineups) > 0

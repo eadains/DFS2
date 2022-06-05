@@ -5,3 +5,5 @@ using Dates
 using SCIP
 
 players = DataFrame(CSV.File("./data/TEST_SLATE.csv"))
+
+μ = players[:Projection, !]

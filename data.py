@@ -41,16 +41,20 @@ proj = proj.drop_duplicates(subset=["Player", "Pos", "Salary"])
 proj = proj.dropna()
 
 # Merge projections with slated players
+# TODO: Join on position handle multiple positions on slate
 slate = slate.merge(
-    proj, left_on=["Nickname", "Salary"], right_on=["Player", "Salary"], how="left",
+    proj,
+    left_on=["Nickname", "Position", "Salary"],
+    right_on=["Player", "Pos", "Salary"],
+    how="left",
 )
 
 # Drop all pitchers that are not starting
 slate = slate.drop(
     slate.loc[(slate["Position"] == "P") & (slate["Probable Pitcher"].isna()), :].index
 )
-# Drop players from postponed games
-slate = slate.drop(slate[slate["Injury Details"] == "Postponed"].index)
+# Drop players that are not playing for any reason
+slate = slate.drop(slate[~slate["Injury Indicator"].isna()].index)
 # BIG ASSUMPTION: assume player fills only first position listed.
 # Because of the UTIL slot, I assume this has only minimal impact
 # upon optimality
