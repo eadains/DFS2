@@ -2,6 +2,54 @@ import pandas as pd
 import numpy as np
 from difflib import get_close_matches
 from datetime import datetime
+from bs4 import BeautifulSoup
+import quopri
+import re
+
+name_pattern = re.compile(r"\([^()]*\)")
+team_pattern = re.compile(r"[\$,]")
+
+
+def linestar_proj():
+    html = open("./data/proj.mhtml", "r")
+    html = quopri.decodestring(html.read())
+    soup = BeautifulSoup(html, features="html.parser")
+
+    table = soup.find_all("table")[0]
+
+    # Find column index numbers for columns we want
+    # This is to avoid issues when columns change between before games and after games
+    header_idx = {
+        "Player": None,
+        "Salary": None,
+        "Consensus": None,
+        "Order": None,
+        "pOwn": None,
+    }
+    # Ignore first columns that have filters etcetera
+    for num, header in enumerate(table.find_all("th")[2:]):
+        if header.text in header_idx.keys():
+            # Position column always in front, so add 1 to index value
+            header_idx[header.text] = num + 1
+
+    data = []
+    rows = table.find_all("tr", class_="playerCardRow")
+    for row in rows:
+        # Ignore first 4 columns that have checkboxes and other things
+        cells = row.find_all("td")[4:]
+        player_data = {
+            "Position": cells[0].text,
+            "Player": name_pattern.sub(
+                "", cells[header_idx["Player"]].find(class_="playername").text
+            ).rstrip(),
+            "Team": cells[header_idx["Player"]].find(class_="playerTeam").text[2:],
+            "Salary": int(team_pattern.sub("", cells[header_idx["Salary"]].text)),
+            "Consensus": float(cells[header_idx["Consensus"]].text),
+            "Order": int(cells[header_idx["Order"]].text.replace("-", "0")),
+            "pOwn": float(cells[header_idx["pOwn"]].text.replace("%", "")) / 100,
+        }
+        data.append(player_data)
+    return pd.DataFrame(data)
 
 
 def opp_pitcher(x):
@@ -10,7 +58,7 @@ def opp_pitcher(x):
         return np.nan
 
     series = slate.loc[
-        (slate["Team"] == x["Opponent"]) & (slate["Position"] == "P"), "Player"
+        (slate["Team"] == x["Opponent"]) & (slate["Position"] == "P"), "Id"
     ]
     if len(series) == 0:
         return np.nan
@@ -30,59 +78,57 @@ def close_matches(x, possible):
 
 slate = pd.read_csv("./data/slate.csv")
 
-proj = pd.concat([pd.read_csv("./data/proj_1.csv"), pd.read_csv("./data/proj_2.csv")])
-# Find closest name matches from slate
+proj = linestar_proj()
 proj["Player"] = proj["Player"].apply(lambda x: close_matches(x, slate["Nickname"]))
-# Sometimes salary contains commas
-proj["Salary"] = proj["Salary"].str.replace(",", "")
-proj["Salary"] = proj["Salary"].astype(int)
-# Sometimes data is duplicated
-proj = proj.drop_duplicates(subset=["Player", "Pos", "Salary"])
-proj = proj.dropna()
-
-# Merge projections with slated players
-# TODO: Join on position handle multiple positions on slate
 slate = slate.merge(
     proj,
-    left_on=["Nickname", "Position", "Salary"],
-    right_on=["Player", "Pos", "Salary"],
+    left_on=["Nickname", "Team", "Salary", "Position"],
+    right_on=["Player", "Team", "Salary", "Position"],
     how="left",
 )
 
+# Get historical points scored standard deviation for players
+stds = pd.read_csv("./data/stds.csv")
+stds["Name"] = stds["Name"].apply(lambda x: close_matches(x, slate["Nickname"]))
+# Merge stds to slate
+slate = slate.merge(stds, left_on="Nickname", right_on="Name", how="left")
+# Set any unfilled player standard deviations to the mean value
+slate["Scored_Std"] = slate["Scored_Std"].replace(np.nan, slate["Scored_Std"].mean())
+
+# Drop duplicate rows before adjusting position column
+slate = slate.drop_duplicates(subset=["Nickname", "Position", "Team"])
 # Drop all pitchers that are not starting
 slate = slate.drop(
-    slate.loc[(slate["Position"] == "P") & (slate["Probable Pitcher"].isna()), :].index
+    slate[(slate["Position"] == "P") & (slate["Probable Pitcher"].isna())].index
 )
-# Drop players that are not playing for any reason
-slate = slate.drop(slate[~slate["Injury Indicator"].isna()].index)
 # BIG ASSUMPTION: assume player fills only first position listed.
 # Because of the UTIL slot, I assume this has only minimal impact
 # upon optimality
 slate["Position"] = slate["Position"].str.split("/", expand=True)[0]
 # C and 1B players can fill the C/1B slot
 slate["Position"] = slate["Position"].replace({"C": "C/1B", "1B": "C/1B"})
-# Pitchers have batting order 0
-# Non-starting players also have batting order 0
-slate["Batting Order"] = slate["Batting Order"].replace(np.nan, 0)
-slate["Batting Order"] = slate["Batting Order"].astype(int)
+slate["Order"] = slate["Order"].astype(int)
+# Drop batters who aren't starting
+slate = slate.drop(slate[(slate["Order"] == 0) & (slate["Position"] != "P")].index)
 # Opposing Pitcher for each player
 slate["Opp_Pitcher"] = slate.apply(opp_pitcher, axis=1)
-# Drop players with 0 fantasy points projected
-slate = slate[slate["Proj"] > 0]
+# Only care about players with positive projections
+slate = slate[slate["Consensus"] > 0]
 
-# Select relevant columns and rename
 slate = slate[
     [
-        "Player",
+        "Nickname",
         "Id",
         "Position",
         "Salary",
         "Game",
         "Team",
         "Opponent",
-        "Batting Order",
+        "Order",
         "Opp_Pitcher",
-        "Proj",
+        "Consensus",
+        "pOwn",
+        "Scored_Std",
     ]
 ]
 slate.columns = [
@@ -96,6 +142,8 @@ slate.columns = [
     "Order",
     "Opp_Pitcher",
     "Projection",
+    "Proj_Ownership",
+    "Hist_Std",
 ]
 
 # Write to csv with todays date

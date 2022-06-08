@@ -24,10 +24,9 @@ function do_optim(players, past_lineups)
     for team in teams
         for order in stack_orders
             stack_players = players[(players.Team.==team).*(in.(players.Order, Ref(order))), :ID]
-            # Sometimes batting orders are 0's
-            if length(stack_players) > 0
-                push!(stacks, Stack(stack_players))
-            end
+            # Testing
+            #stack_players = players[(players.Team.==team).&(players.Order.∈Ref(order)), :ID]
+            push!(stacks, Stack(stack_players))
         end
     end
 
@@ -76,7 +75,7 @@ function do_optim(players, past_lineups)
 
     for team in teams
         # Excluding the pitcher, we can select a maximum of 4 players per team
-        # @constraint(model, sum(x[player.ID] for player in eachrow(players) if player.Team == team && player.Position != "P") <= 4)
+        @constraint(model, sum(x[player.ID] for player in eachrow(players) if player.Team == team && player.Position != "P") <= 4)
         # If no players are selected from a team, y is set to 0
         @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(players) if player.Team == team))
     end
@@ -120,7 +119,7 @@ end
 
 players = DataFrame(CSV.File("./data/slate_$(Dates.today()).csv"))
 # Number of lineups to generate
-N = 60
+N = 40
 past_lineups = []
 
 for n in 1:N
