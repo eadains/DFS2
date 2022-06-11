@@ -119,7 +119,7 @@ end
 
 players = DataFrame(CSV.File("./data/slate_$(Dates.today()).csv"))
 # Number of lineups to generate
-N = 40
+N = 50
 past_lineups = []
 
 for n in 1:N

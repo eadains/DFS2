@@ -76,10 +76,12 @@ def close_matches(x, possible):
         return np.nan
 
 
+# Linestar Slate
 slate = pd.read_csv("./data/slate.csv")
 
 proj = linestar_proj()
 proj["Player"] = proj["Player"].apply(lambda x: close_matches(x, slate["Nickname"]))
+
 slate = slate.merge(
     proj,
     left_on=["Nickname", "Team", "Salary", "Position"],
@@ -97,6 +99,7 @@ slate["Scored_Std"] = slate["Scored_Std"].replace(np.nan, slate["Scored_Std"].me
 
 # Drop duplicate rows before adjusting position column
 slate = slate.drop_duplicates(subset=["Nickname", "Position", "Team"])
+slate = slate.dropna(subset=["Player", "Consensus", "Order"])
 # Drop all pitchers that are not starting
 slate = slate.drop(
     slate[(slate["Position"] == "P") & (slate["Probable Pitcher"].isna())].index
@@ -110,8 +113,15 @@ slate["Position"] = slate["Position"].replace({"C": "C/1B", "1B": "C/1B"})
 slate["Order"] = slate["Order"].astype(int)
 # Drop batters who aren't starting
 slate = slate.drop(slate[(slate["Order"] == 0) & (slate["Position"] != "P")].index)
+# Drop batters with injuries
+slate = slate[slate["Injury Indicator"].isna()]
 # Opposing Pitcher for each player
 slate["Opp_Pitcher"] = slate.apply(opp_pitcher, axis=1)
+# Sometimes teams dont have a probable pitcher listed, so drop when teams don't
+# have an opposing pitcher
+slate = slate.drop(
+    slate[(slate["Position"] != "P") & (slate["Opp_Pitcher"].isna())].index
+)
 # Only care about players with positive projections
 slate = slate[slate["Consensus"] > 0]
 
