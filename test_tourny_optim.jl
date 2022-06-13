@@ -2,11 +2,10 @@ using JuMP
 using DataFrames
 using CSV
 using Dates
-using Juniper
-using Ipopt
 using LinearAlgebra
 using Distributions
 using StatsBase
+using SCIP
 
 
 """
@@ -115,7 +114,7 @@ function compute_order_stat(players::DataFrame, μ::Vector{Float64}, cutoff::Int
 end
 
 
-function do_optim(players, past_lineups, μ::Vector{Float64}, Σ::Matrix{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64})
+function do_optim(players, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64}, λ::Float64)
     games = unique(players.Game)
     teams = unique(players.Team)
     positions = unique(players.Position)
@@ -138,9 +137,7 @@ function do_optim(players, past_lineups, μ::Vector{Float64}, Σ::Matrix{Float64
         "OF" => 3
     )
 
-    nl_solver = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
-    minlp_solver = optimizer_with_attributes(Juniper.Optimizer, "nl_solver" => nl_solver)
-    model = Model(minlp_solver)
+    model = Model(optimizer_with_attributes(SCIP.Optimizer, "display/verblevel" => 1))
 
     # Players selected
     @variable(model, x[players.ID], binary = true)
@@ -184,21 +181,38 @@ function do_optim(players, past_lineups, μ::Vector{Float64}, Σ::Matrix{Float64
 
     mu_x = @expression(model, x.data' * μ - opp_mu)
     var_x = @expression(model, x.data' * Σ * x.data + opp_var - 2 * x.data' * opp_cov)
-    @NLobjective(model, Min, -mu_x / var_x)
+    @objective(model, Max, mu_x + λ * var_x)
 
     optimize!(model)
     println(termination_status(model))
-    return value.(x)
+    # SCIP only checks for integer values within a tolerance, so round the result to the nearest integer
+    return (round.(Int, value.(x)), 1 - cdf(Normal(), -value(mu_x) / value(var_x)))
 end
 
-#players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
-players = DataFrame(CSV.File("./data/TEST_SLATE.csv"))
+
+function lambda_max(players, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64})
+    # I've found that lambdas from around 0.03 to 0.05 are selected
+    lambdas = 0.03:0.01:0.05
+    w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
+    # Perform optimization over array of λ values
+    Threads.@threads for i in 1:length(lambdas)
+        w_star[i] = do_optim(players, past_lineups, μ, Σ, opp_mu, opp_var, opp_cov, lambdas[i])
+    end
+
+    # Find lambda value that leads to highest objective function and return its corresponding lineup vector
+    max_index = argmax(x[2] for x in w_star)
+    println("λ max: $(lambdas[max_index])")
+    return w_star[max_index][1]
+end
+
+
+players = DataFrame(CSV.File("./data/slate_$(Dates.today()).csv"))
 
 μ = players[!, :Projection]
 σ = players[!, :Hist_Std]
 # covariance matrix must be positive definite so that Distributions.jl MvNormal
 # can do a cholesky factorization on it
-Σ = makeposdef(Diagonal(σ) * Tables.matrix(CSV.File("./data/TEST_SLATE_corr.csv", header=false)) * Diagonal(σ))
+Σ = makeposdef(Diagonal(σ) * Tables.matrix(CSV.File("./data/corr_$(Dates.today()).csv", header=false)) * Diagonal(σ))
 
 # Total opponent entries in tournament
 total_entries = 1000
@@ -219,3 +233,50 @@ opp_mu = mean(order_stats)
 opp_var = var(order_stats)
 # This is covariance between each individual player's score draws and the whole group of order statistics
 opp_cov = [cov([x[i] for x in score_draws], order_stats) for i in 1:nrow(players)]
+
+N = 40
+past_lineups = []
+for n in 1:N
+    println(n)
+    lineup = lambda_max(players, past_lineups, μ, Σ, opp_mu, opp_var, opp_cov)
+    append!(past_lineups, Ref(lineup))
+end
+
+lineups = []
+for lineup in past_lineups
+    # Roster positions to fill
+    positions = Dict{String,Union{String,Missing}}("P" => missing, "C/1B" => missing, "2B" => missing, "3B" => missing, "SS" => missing, "OF1" => missing, "OF2" => missing, "OF3" => missing, "UTIL" => missing)
+    for player in eachrow(players)
+        # If player is selected
+        if value(lineup[player.ID]) == 1
+            # If they're OF, fill open OF slot, or if they're full, then UTIL
+            if player.Position == "OF"
+                if ismissing(positions["OF1"])
+                    positions["OF1"] = player.ID
+                elseif ismissing(positions["OF2"])
+                    positions["OF2"] = player.ID
+                elseif ismissing(positions["OF3"])
+                    positions["OF3"] = player.ID
+                else
+                    positions["UTIL"] = player.ID
+                end
+            else
+                # Otherwise, fill players position, and if it's full, then UTIL
+                if ismissing(positions[player.Position])
+                    positions[player.Position] = player.ID
+                else
+                    positions["UTIL"] = player.ID
+                end
+            end
+        end
+    end
+    append!(lineups, Ref(positions))
+end
+
+# Print lineups to CSV in FanDuel format
+open("./tourny_lineups.csv", "w") do file
+    println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
+    for lineup in lineups
+        println(file, "$(lineup["P"]),$(lineup["C/1B"]),$(lineup["2B"]),$(lineup["3B"]),$(lineup["SS"]),$(lineup["OF1"]),$(lineup["OF2"]),$(lineup["OF3"]),$(lineup["UTIL"])")
+    end
+end

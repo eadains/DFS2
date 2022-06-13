@@ -23,15 +23,15 @@ pitchers_corr = batters[["Scored", "Scored Opposing"]].corr()
 pitchers_corr = pitchers_corr.loc["Scored", "Scored Opposing"]
 
 slate = pd.read_csv(f"./data/slate_{datetime.today().strftime('%Y-%m-%d')}.csv")
-corr = pd.DataFrame(columns=slate["Name"], index=slate["Name"], dtype=float)
+corr = pd.DataFrame(columns=slate["ID"], index=slate["ID"], dtype=float)
 
 for row in slate.itertuples():
     # Correlation with themselves is 1
-    corr.loc[row.Name, row.Name] = 1
+    corr.loc[row.ID, row.ID] = 1
 
     # If pitcher, set correlation to everyone else to 0
     if row.Position == "P":
-        corr.loc[row.Name, corr.columns != row.Name] = 0
+        corr.loc[row.ID, corr.columns != row.ID] = 0
 
     else:
         # Setting correlation to other batters on the same team according to
@@ -39,18 +39,18 @@ for row in slate.itertuples():
         for teammate in slate.loc[slate["Team"] == row.Team, :].itertuples():
             # If the teammate is the pitcher, then 0 correlation
             if teammate.Position == "P":
-                corr.loc[row.Name, teammate.Name] = 0
-                corr.loc[teammate.Name, row.Name] = 0
+                corr.loc[row.ID, teammate.ID] = 0
+                corr.loc[teammate.ID, row.ID] = 0
             else:
                 order_corr = batters_corr.loc[row.Order, teammate.Order]
-                corr.loc[row.Name, teammate.Name] = order_corr
-                corr.loc[teammate.Name, row.Name] = order_corr
+                corr.loc[row.ID, teammate.ID] = order_corr
+                corr.loc[teammate.ID, row.ID] = order_corr
 
         # Set correlation to opposing pitcher
-        corr.loc[row.Name, row.Opp_Pitcher] = pitchers_corr
-        corr.loc[row.Opp_Pitcher, row.Name] = pitchers_corr
+        corr.loc[row.ID, row.Opp_Pitcher] = pitchers_corr
+        corr.loc[row.Opp_Pitcher, row.ID] = pitchers_corr
         # Correlations with every other Name is 0
-        corr.loc[row.Name, corr.loc[row.Name].isna()] = 0
+        corr.loc[row.ID, corr.loc[row.ID].isna()] = 0
 
 # Check that the correlation matrix is symmetric and all its eigenvalues are >= 0
 # These two conditions jointly imply the matrix is positive semi-definite
