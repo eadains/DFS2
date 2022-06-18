@@ -17,7 +17,7 @@ to small value (1e-10) and then reconstructs matrix
 
 Returns Hermitian positive definite matrix
 """
-function makeposdef(mat::Matrix)
+function makeposdef(mat::Hermitian{Float64})
     vals = eigvals(mat)
     vecs = eigvecs(mat)
     vals[vals.<=1e-10] .= 1e-10
@@ -114,11 +114,10 @@ function compute_order_stat(players::DataFrame, μ::Vector{Float64}, cutoff::Int
 end
 
 
-function do_optim(players, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64}, λ::Float64)
+function do_optim(overlap::Int, players::DataFrame, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64}, λ::Float64)
     games = unique(players.Game)
     teams = unique(players.Team)
     positions = unique(players.Position)
-    overlap = 5
 
     positions_max = Dict(
         "P" => 1,
@@ -190,13 +189,13 @@ function do_optim(players, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Floa
 end
 
 
-function lambda_max(players, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64})
+function lambda_max(overlap::Int, players::DataFrame, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64})
     # I've found that lambdas from around 0.03 to 0.05 are selected
     lambdas = 0.03:0.01:0.05
     w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
     # Perform optimization over array of λ values
     Threads.@threads for i in 1:length(lambdas)
-        w_star[i] = do_optim(players, past_lineups, μ, Σ, opp_mu, opp_var, opp_cov, lambdas[i])
+        w_star[i] = do_optim(overlap, players, past_lineups, μ, Σ, opp_mu, opp_var, opp_cov, lambdas[i])
     end
 
     # Find lambda value that leads to highest objective function and return its corresponding lineup vector
@@ -205,19 +204,20 @@ function lambda_max(players, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Fl
     return w_star[max_index][1]
 end
 
+date = "2022-06-09"
 
-players = DataFrame(CSV.File("./data/slate_$(Dates.today()).csv"))
+players = DataFrame(CSV.File("./data/slates/slate_$(date).csv"))
 
 μ = players[!, :Projection]
 σ = players[!, :Hist_Std]
 # covariance matrix must be positive definite so that Distributions.jl MvNormal
 # can do a cholesky factorization on it
-Σ = makeposdef(Diagonal(σ) * Tables.matrix(CSV.File("./data/corr_$(Dates.today()).csv", header=false)) * Diagonal(σ))
+Σ = makeposdef(Hermitian(Diagonal(σ) * Tables.matrix(CSV.File("./data/slates/corr_$(date).csv", header=false)) * Diagonal(σ)))
 
 # Total opponent entries in tournament
-total_entries = 1000
+total_entries = 5000
 # Focus on maximizing the probability that our lineup ranks in the top 1%
-cutoff = Int(0.01 * total_entries)
+cutoff = Int(0.001 * total_entries)
 
 score_draws = Vector{Float64}[]
 order_stats = Float64[]
@@ -234,49 +234,53 @@ opp_var = var(order_stats)
 # This is covariance between each individual player's score draws and the whole group of order statistics
 opp_cov = [cov([x[i] for x in score_draws], order_stats) for i in 1:nrow(players)]
 
-N = 40
-past_lineups = []
-for n in 1:N
-    println(n)
-    lineup = lambda_max(players, past_lineups, μ, Σ, opp_mu, opp_var, opp_cov)
-    append!(past_lineups, Ref(lineup))
-end
+overlaps = 0:5
+for overlap in overlaps
+    println("Overlap: $(overlap)")
+    N = 10
+    past_lineups = JuMP.Containers.DenseAxisArray[]
+    for n in 1:N
+        println("n: $(n)")
+        lineup = lambda_max(overlap, players, past_lineups, μ, Σ, opp_mu, opp_var, opp_cov)
+        append!(past_lineups, Ref(lineup))
+    end
 
-lineups = []
-for lineup in past_lineups
-    # Roster positions to fill
-    positions = Dict{String,Union{String,Missing}}("P" => missing, "C/1B" => missing, "2B" => missing, "3B" => missing, "SS" => missing, "OF1" => missing, "OF2" => missing, "OF3" => missing, "UTIL" => missing)
-    for player in eachrow(players)
-        # If player is selected
-        if value(lineup[player.ID]) == 1
-            # If they're OF, fill open OF slot, or if they're full, then UTIL
-            if player.Position == "OF"
-                if ismissing(positions["OF1"])
-                    positions["OF1"] = player.ID
-                elseif ismissing(positions["OF2"])
-                    positions["OF2"] = player.ID
-                elseif ismissing(positions["OF3"])
-                    positions["OF3"] = player.ID
+    lineups = []
+    for lineup in past_lineups
+        # Roster positions to fill
+        positions = Dict{String,Union{String,Missing}}("P" => missing, "C/1B" => missing, "2B" => missing, "3B" => missing, "SS" => missing, "OF1" => missing, "OF2" => missing, "OF3" => missing, "UTIL" => missing)
+        for player in eachrow(players)
+            # If player is selected
+            if value(lineup[player.ID]) == 1
+                # If they're OF, fill open OF slot, or if they're full, then UTIL
+                if player.Position == "OF"
+                    if ismissing(positions["OF1"])
+                        positions["OF1"] = player.ID
+                    elseif ismissing(positions["OF2"])
+                        positions["OF2"] = player.ID
+                    elseif ismissing(positions["OF3"])
+                        positions["OF3"] = player.ID
+                    else
+                        positions["UTIL"] = player.ID
+                    end
                 else
-                    positions["UTIL"] = player.ID
-                end
-            else
-                # Otherwise, fill players position, and if it's full, then UTIL
-                if ismissing(positions[player.Position])
-                    positions[player.Position] = player.ID
-                else
-                    positions["UTIL"] = player.ID
+                    # Otherwise, fill players position, and if it's full, then UTIL
+                    if ismissing(positions[player.Position])
+                        positions[player.Position] = player.ID
+                    else
+                        positions["UTIL"] = player.ID
+                    end
                 end
             end
         end
+        append!(lineups, Ref(positions))
     end
-    append!(lineups, Ref(positions))
-end
 
-# Print lineups to CSV in FanDuel format
-open("./tourny_lineups.csv", "w") do file
-    println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
-    for lineup in lineups
-        println(file, "$(lineup["P"]),$(lineup["C/1B"]),$(lineup["2B"]),$(lineup["3B"]),$(lineup["SS"]),$(lineup["OF1"]),$(lineup["OF2"]),$(lineup["OF3"]),$(lineup["UTIL"])")
+    # Print lineups to CSV in FanDuel format
+    open("./lineups_$(date)-O$(overlap).csv", "w") do file
+        println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
+        for lineup in lineups
+            println(file, "$(lineup["P"]),$(lineup["C/1B"]),$(lineup["2B"]),$(lineup["3B"]),$(lineup["SS"]),$(lineup["OF1"]),$(lineup["OF2"]),$(lineup["OF3"]),$(lineup["UTIL"])")
+        end
     end
 end

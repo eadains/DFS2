@@ -157,4 +157,6 @@ slate.columns = [
 ]
 
 # Write to csv with todays date
-slate.to_csv(f"./data/slate_{datetime.today().strftime('%Y-%m-%d')}.csv", index=False)
+slate.to_csv(
+    f"./data/slates/slate_{datetime.today().strftime('%Y-%m-%d')}.csv", index=False
+)

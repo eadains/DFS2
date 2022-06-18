@@ -22,7 +22,7 @@ batters = batters.merge(
 pitchers_corr = batters[["Scored", "Scored Opposing"]].corr()
 pitchers_corr = pitchers_corr.loc["Scored", "Scored Opposing"]
 
-slate = pd.read_csv(f"./data/slate_{datetime.today().strftime('%Y-%m-%d')}.csv")
+slate = pd.read_csv(f"./data/slates/slate_{datetime.today().strftime('%Y-%m-%d')}.csv")
 corr = pd.DataFrame(columns=slate["ID"], index=slate["ID"], dtype=float)
 
 for row in slate.itertuples():

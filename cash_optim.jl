@@ -4,7 +4,7 @@ using CSV
 using Dates
 using GLPK
 
-players = DataFrame(CSV.File("./data/slate_$(Dates.today()).csv"))
+players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
 games = unique(players.Game)
 teams = unique(players.Team)
 positions = unique(players.Position)
