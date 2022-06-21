@@ -6,7 +6,9 @@ using LinearAlgebra
 using Distributions
 using StatsBase
 using SCIP
-
+using Pavito
+using GLPK
+using Ipopt
 
 """
     makeposdef(mat::Matrix)
@@ -186,13 +188,13 @@ function do_optim(players::DataFrame, past_lineups, μ::Vector{Float64}, Σ::Her
     optimize!(model)
     println(termination_status(model))
     # SCIP only checks for integer values within a tolerance, so round the result to the nearest integer
-    return (round.(Int, value.(x)), 1 - cdf(Normal(), -value(mu_x) / value(var_x)))
+    return (round.(Int, value.(x)), 1 - cdf(Normal(), -value(mu_x) / sqrt(value(var_x))))
 end
 
 
 function lambda_max(players::DataFrame, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64})
     # I've found that lambdas from around 0.03 to 0.05 are selected
-    lambdas = 0.02:0.01:0.06
+    lambdas = 0:0.01:0.30
     w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
     # Perform optimization over array of λ values
     Threads.@threads for i in 1:length(lambdas)
@@ -216,7 +218,7 @@ players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
 
 # Total opponent entries in tournament
 total_entries = 5000
-# Focus on maximizing the probability that our lineup ranks in the top 1%
+# Focus on maximizing the probability that our lineup ranks in the top .1%
 cutoff = Int(0.001 * total_entries)
 
 score_draws = Vector{Float64}[]
@@ -234,7 +236,7 @@ opp_var = var(order_stats)
 # This is covariance between each individual player's score draws and the whole group of order statistics
 opp_cov = [cov([x[i] for x in score_draws], order_stats) for i in 1:nrow(players)]
 
-N = 60
+N = 10
 past_lineups = JuMP.Containers.DenseAxisArray[]
 for n in 1:N
     println(n)
