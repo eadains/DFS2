@@ -5,10 +5,7 @@ using Dates
 using LinearAlgebra
 using Distributions
 using StatsBase
-using SCIP
-using Pavito
-using GLPK
-using Ipopt
+using Xpress
 
 """
     makeposdef(mat::Matrix)
@@ -33,7 +30,7 @@ end
 Generates a random MLB FanDuel DFS team.
 Expects columns :Position, :ID, :Proj_Ownership
 """
-function gen_team(players::DataFrame)
+function gen_team(players::DataFrame)::DataFrame
     positions = Dict(
         "P" => 1,
         "C/1B" => 1,
@@ -90,7 +87,7 @@ end
 Generates possible opponent entries until a valid team is generated,
 and then returns that lineups expected number of fantasy points by using μ
 """
-function opp_team_score(players::DataFrame, μ::Vector{Float64})
+function opp_team_score(players::DataFrame, μ::Vector{Float64})::Float64
     while true
         team = gen_team(players)
         if verify_team(team)
@@ -120,7 +117,7 @@ function do_optim(players::DataFrame, past_lineups, μ::Vector{Float64}, Σ::Her
     games = unique(players.Game)
     teams = unique(players.Team)
     positions = unique(players.Position)
-    overlap = 5
+    overlap = 4
 
     positions_max = Dict(
         "P" => 1,
@@ -139,7 +136,7 @@ function do_optim(players::DataFrame, past_lineups, μ::Vector{Float64}, Σ::Her
         "OF" => 3
     )
 
-    model = Model(optimizer_with_attributes(SCIP.Optimizer, "display/verblevel" => 1))
+    model = Model(Xpress.Optimizer)
 
     # Players selected
     @variable(model, x[players.ID], binary = true)
@@ -193,8 +190,8 @@ end
 
 
 function lambda_max(players::DataFrame, past_lineups, μ::Vector{Float64}, Σ::Hermitian{Float64}, opp_mu::Float64, opp_var::Float64, opp_cov::Vector{Float64})
-    # I've found that lambdas from around 0.03 to 0.05 are selected
-    lambdas = 0:0.01:0.30
+    # I've found that lambdas from around 0 to 0.05 are selected, with strong majority being 0.02
+    lambdas = 0:0.005:0.05
     w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
     # Perform optimization over array of λ values
     Threads.@threads for i in 1:length(lambdas)
@@ -217,13 +214,14 @@ players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
 Σ = makeposdef(Hermitian(Diagonal(σ) * Tables.matrix(CSV.File("./data/slates/corr_$(Dates.today()).csv", header=false)) * Diagonal(σ)))
 
 # Total opponent entries in tournament
-total_entries = 5000
+total_entries = 1000
 # Focus on maximizing the probability that our lineup ranks in the top .1%
 cutoff = Int(0.001 * total_entries)
 
 score_draws = Vector{Float64}[]
 order_stats = Float64[]
-for i = 1:100
+# 1000 entries and 500 iterations takes < 5 minutes
+for i = 1:500
     score_draw = rand(MvNormal(μ, Σ))
     order_stat = compute_order_stat(players, score_draw, cutoff, total_entries)
     println("$(i) done.")
@@ -236,7 +234,8 @@ opp_var = var(order_stats)
 # This is covariance between each individual player's score draws and the whole group of order statistics
 opp_cov = [cov([x[i] for x in score_draws], order_stats) for i in 1:nrow(players)]
 
-N = 10
+# N = 50 takes < 10 minutes
+N = 50
 past_lineups = JuMP.Containers.DenseAxisArray[]
 for n in 1:N
     println(n)

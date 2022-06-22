@@ -4,73 +4,111 @@ using CSV
 using Dates
 using GLPK
 
+
+struct CashData
+    players::DataFrame
+end
+
 players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
-games = unique(players.Game)
-teams = unique(players.Team)
-positions = unique(players.Position)
 
-positions_max = Dict(
-    "P" => 1,
-    "C/1B" => 2,
-    "2B" => 2,
-    "3B" => 2,
-    "SS" => 2,
-    "OF" => 4
-)
+"""
+    do_optim(data::CashData)
 
-positions_min = Dict(
-    "P" => 1,
-    "C/1B" => 1,
-    "2B" => 1,
-    "3B" => 1,
-    "SS" => 1,
-    "OF" => 3
-)
+Runs optimization for cash games
+"""
+function do_optim(data::CashData)
+    games = unique(data.players.Game)
+    teams = unique(data.players.Team)
+    positions = unique(data.players.Position)
 
-model = Model(GLPK.Optimizer)
+    positions_max = Dict(
+        "P" => 1,
+        "C/1B" => 2,
+        "2B" => 2,
+        "3B" => 2,
+        "SS" => 2,
+        "OF" => 4
+    )
 
-# Players selected
-@variable(model, x[players.ID], binary = true)
-# Games selected
-@variable(model, y[teams], binary = true)
-# Teams selected
-@variable(model, z[games], binary = true)
+    positions_min = Dict(
+        "P" => 1,
+        "C/1B" => 1,
+        "2B" => 1,
+        "3B" => 1,
+        "SS" => 1,
+        "OF" => 3
+    )
 
-# Total salary of selected players must be <= $35,000
-@constraint(model, sum(player.Salary * x[player.ID] for player in eachrow(players)) <= 35000)
+    model = Model(GLPK.Optimizer)
 
-# Must select 9 total players
-@constraint(model, sum(x) == 9)
+    # Players selected
+    @variable(model, x[players.ID], binary = true)
+    # Games selected
+    @variable(model, y[teams], binary = true)
+    # Teams selected
+    @variable(model, z[games], binary = true)
 
-# Maximum and minimum number of players we can select for each position
-# Must always have 1 pitcher, who cannot fill the UTIL position
-# We can select up to 1 additional player from each other position because
-# the second can fill the UTIL position
-for position in positions
-    @constraint(model, positions_min[position] <= sum(x[player.ID] for player in eachrow(players) if player.Position == position) <= positions_max[position])
+    # Total salary of selected players must be <= $35,000
+    @constraint(model, sum(player.Salary * x[player.ID] for player in eachrow(data.players)) <= 35000)
+
+    # Must select 9 total players
+    @constraint(model, sum(x) == 9)
+
+    # Maximum and minimum number of players we can select for each position
+    # Must always have 1 pitcher, who cannot fill the UTIL position
+    # We can select up to 1 additional player from each other position because
+    # the second can fill the UTIL position
+    for position in positions
+        @constraint(model, positions_min[position] <= sum(x[player.ID] for player in eachrow(data.players) if player.Position == position) <= positions_max[position])
+    end
+
+    for team in teams
+        # Excluding the pitcher, we can select a maximum of 4 players per team
+        @constraint(model, sum(x[player.ID] for player in eachrow(data.players) if player.Team == team && player.Position != "P") <= 4)
+        # If no players are selected from a team, y is set to 0
+        @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(data.players) if player.Team == team))
+    end
+    # Must have players from at least 3 teams
+    @constraint(model, sum(y) >= 3)
+
+    for game in games
+        # If no players are selected from a game z is set to 0
+        @constraint(model, z[game] <= sum(x[player.ID] for player in eachrow(data.players) if player.Game == game))
+    end
+    # Must select players from at least 2 games
+    @constraint(model, sum(z) >= 2)
+
+    # Maximize projected fantasy points
+    @objective(model, Max, sum(player.Projection * x[player.ID] for player in eachrow(data.players)))
+
+    optimize!(model)
+    println(termination_status(model))
+    return (objective_value(model), value.(x))
 end
 
-for team in teams
-    # Excluding the pitcher, we can select a maximum of 4 players per team
-    @constraint(model, sum(x[player.ID] for player in eachrow(players) if player.Team == team && player.Position != "P") <= 4)
-    # If no players are selected from a team, y is set to 0
-    @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(players) if player.Team == team))
+
+"""
+    make_cash_data()
+
+Creates data struct for cash game optimization
+"""
+function make_cash_data()
+    players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
+    return CashData(players)
 end
-# Must have players from at least 3 teams
-@constraint(model, sum(y) >= 3)
 
-for game in games
-    # If no players are selected from a game z is set to 0
-    @constraint(model, z[game] <= sum(x[player.ID] for player in eachrow(players) if player.Game == game))
+
+"""
+    solve_cash()
+
+Solves cash game optimization and writes results to file
+"""
+function solve_cash()
+    data = make_cash_data()
+    points, lineup = do_optim(data)
+    lineup = transform_lineup(lineup)
+    write_lineup(points, lineup)
 end
-# Must select players from at least 2 games
-@constraint(model, sum(z) >= 2)
-
-# Maximize projected fantasy points
-@objective(model, Max, sum(player.Projection * x[player.ID] for player in eachrow(players)))
-
-optimize!(model)
-println(termination_status(model))
 
 # Construct lineup: put players in roster positions
 lineup = Dict{String,Union{String,Missing}}("P" => missing, "C/1B" => missing, "2B" => missing, "3B" => missing, "SS" => missing, "OF1" => missing, "OF2" => missing, "OF3" => missing, "UTIL" => missing)

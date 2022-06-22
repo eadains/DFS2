@@ -6,15 +6,22 @@ using LinearAlgebra
 using Distributions
 using StatsBase
 using Xpress
+using GLPK
 
+abstract type OptimData end
 
-struct TournyData
+struct TournyData <: OptimData
     players::DataFrame
     μ::Vector{<:Real}
     Σ::Symmetric{<:Real}
     opp_mu::Real
     opp_var::Real
     opp_cov::Vector{<:Real}
+end
+
+
+struct CashData <: OptimData
+    players::DataFrame
 end
 
 
@@ -159,13 +166,24 @@ function make_tourny_data(entries, cutoff)
     μ::Vector{Float64} = players[!, :Projection]
     σ::Vector{Float64} = players[!, :Hist_Std]
     corr_mat::Matrix{Float64} = Tables.matrix(CSV.File("./data/slates/corr_$(Dates.today()).csv", header=false))
-    # covariance matrix must be positive definite so that Distributions.jl MvNormal
+    # covariance matrix must be positive d so that Distributions.jl MvNormal
     # can do a cholesky factorization on it
     Σ = makeposdef(Symmetric(Diagonal(σ) * corr_mat * Diagonal(σ)))
 
     opp_mu, opp_var, opp_cov = estimate_opp_stats(players, μ, Σ, entries, cutoff)
 
     return TournyData(players, μ, Σ, opp_mu, opp_var, opp_cov)
+end
+
+
+"""
+    make_cash_data()
+
+Creates data struct for cash game optimization
+"""
+function make_cash_data()
+    players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
+    return CashData(players)
 end
 
 
@@ -241,7 +259,7 @@ function do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAx
         end
     end
 
-    mu_x = @expression(model, x.data' * data.μ - opp_mu)
+    mu_x = @expression(model, x.data' * data.μ - data.opp_mu)
     var_x = @expression(model, x.data' * data.Σ * x.data + data.opp_var - 2 * x.data' * data.opp_cov)
     @objective(model, Max, mu_x + λ * var_x)
 
@@ -249,6 +267,82 @@ function do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAx
     println(termination_status(model))
     # SCIP only checks for integer values within a tolerance, so round the result to the nearest integer
     return (round.(Int, value.(x)), 1 - cdf(Normal(), -value(mu_x) / sqrt(value(var_x))))
+end
+
+
+"""
+    do_optim(data::CashData)
+
+Runs optimization for cash games
+"""
+function do_optim(data::CashData)
+    games = unique(data.players.Game)
+    teams = unique(data.players.Team)
+    positions = unique(data.players.Position)
+
+    positions_max = Dict(
+        "P" => 1,
+        "C/1B" => 2,
+        "2B" => 2,
+        "3B" => 2,
+        "SS" => 2,
+        "OF" => 4
+    )
+
+    positions_min = Dict(
+        "P" => 1,
+        "C/1B" => 1,
+        "2B" => 1,
+        "3B" => 1,
+        "SS" => 1,
+        "OF" => 3
+    )
+
+    model = Model(GLPK.Optimizer)
+
+    # Players selected
+    @variable(model, x[data.players.ID], binary = true)
+    # Games selected
+    @variable(model, y[teams], binary = true)
+    # Teams selected
+    @variable(model, z[games], binary = true)
+
+    # Total salary of selected players must be <= $35,000
+    @constraint(model, sum(player.Salary * x[player.ID] for player in eachrow(data.players)) <= 35000)
+
+    # Must select 9 total players
+    @constraint(model, sum(x) == 9)
+
+    # Maximum and minimum number of players we can select for each position
+    # Must always have 1 pitcher, who cannot fill the UTIL position
+    # We can select up to 1 additional player from each other position because
+    # the second can fill the UTIL position
+    for position in positions
+        @constraint(model, positions_min[position] <= sum(x[player.ID] for player in eachrow(data.players) if player.Position == position) <= positions_max[position])
+    end
+
+    for team in teams
+        # Excluding the pitcher, we can select a maximum of 4 players per team
+        @constraint(model, sum(x[player.ID] for player in eachrow(data.players) if player.Team == team && player.Position != "P") <= 4)
+        # If no players are selected from a team, y is set to 0
+        @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(data.players) if player.Team == team))
+    end
+    # Must have players from at least 3 teams
+    @constraint(model, sum(y) >= 3)
+
+    for game in games
+        # If no players are selected from a game z is set to 0
+        @constraint(model, z[game] <= sum(x[player.ID] for player in eachrow(data.players) if player.Game == game))
+    end
+    # Must select players from at least 2 games
+    @constraint(model, sum(z) >= 2)
+
+    # Maximize projected fantasy points
+    @objective(model, Max, sum(player.Projection * x[player.ID] for player in eachrow(data.players)))
+
+    optimize!(model)
+    println(termination_status(model))
+    return (objective_value(model), value.(x))
 end
 
 
@@ -297,10 +391,10 @@ end
 
 Transforms lineup vector from optimization to a dict mapping between roster position and player ID
 """
-function transform_lineup(lineup::JuMP.Containers.DenseAxisArray)
+function transform_lineup(data::OptimData, lineup::JuMP.Containers.DenseAxisArray)
     # Roster positions to fill
     positions = Dict{String,Union{String,Missing}}("P" => missing, "C/1B" => missing, "2B" => missing, "3B" => missing, "SS" => missing, "OF1" => missing, "OF2" => missing, "OF3" => missing, "UTIL" => missing)
-    for player in eachrow(players)
+    for player in eachrow(data.players)
         # If player is selected
         if value(lineup[player.ID]) == 1
             # If they're OF, fill open OF slot, or if they're full, then UTIL
@@ -333,7 +427,7 @@ end
 
 Writes rosters to CSV in format acceptable by FanDuel
 """
-function write_lineups(lineups::Vector{Dict{String,String}})
+function write_lineups(lineups::Vector{Dict{String,Union{Missing,String}}})
     open("./tourny_lineups.csv", "w") do file
         println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
         for lineup in lineups
@@ -348,7 +442,7 @@ end
 
 Writes cash game lineup to file with expected points
 """
-function write_lineup(points::Number, lineup::Dict{String,String})
+function write_lineup(points::Number, lineup::Dict{String,Union{Missing,String}})
     open("./cash_lineup.csv", "w") do file
         println(file, "Projected Points: $(points)")
         println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
@@ -368,6 +462,19 @@ function solve_tourny()
     data = make_tourny_data(1000, 1)
     # Get 50 lineups
     lineups = get_lineups(data, 50)
-    lineups = map(transform_lineup, lineups)
+    lineups = [transform_lineup(data, x) for x in lineups]
     write_lineups(lineups)
+end
+
+
+"""
+    solve_cash()
+
+Solves cash game optimization and writes results to file
+"""
+function solve_cash()
+    data = make_cash_data()
+    points, lineup = do_optim(data)
+    lineup = transform_lineup(data, lineup)
+    write_lineup(points, lineup)
 end
