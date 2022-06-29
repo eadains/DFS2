@@ -84,18 +84,11 @@ proj["Player"] = proj["Player"].apply(lambda x: close_matches(x, slate["Nickname
 
 slate = slate.merge(
     proj,
-    left_on=["Nickname", "Team", "Salary", "Position"],
-    right_on=["Player", "Team", "Salary", "Position"],
+    left_on=["Nickname", "Team", "Salary"],
+    right_on=["Player", "Team", "Salary"],
     how="left",
+    suffixes=(None, "right"),
 )
-
-# Get historical points scored standard deviation for players
-stds = pd.read_csv("./data/stds.csv")
-stds["Name"] = stds["Name"].apply(lambda x: close_matches(x, slate["Nickname"]))
-# Merge stds to slate
-slate = slate.merge(stds, left_on="Nickname", right_on="Name", how="left")
-# Set any unfilled player standard deviations to the mean value
-slate["Scored_Std"] = slate["Scored_Std"].replace(np.nan, slate["Scored_Std"].mean())
 
 # Drop duplicate rows before adjusting position column
 slate = slate.drop_duplicates(subset=["Nickname", "Position", "Team"])
@@ -138,7 +131,6 @@ slate = slate[
         "Opp_Pitcher",
         "Consensus",
         "pOwn",
-        "Scored_Std",
     ]
 ]
 slate.columns = [
@@ -153,7 +145,6 @@ slate.columns = [
     "Opp_Pitcher",
     "Projection",
     "Proj_Ownership",
-    "Hist_Std",
 ]
 
 # Write to csv with todays date

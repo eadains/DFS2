@@ -119,7 +119,7 @@ end
 Computes order statistic for opponent lineups. Entires is number of opponent lineups
 to generate, cutoff is the order statistics to compute.
 """
-function compute_order_stat(players::DataFrame, μ::Vector{Float64}, cutoff::Int, entries::Int)
+function compute_order_stat(players::DataFrame, μ::Vector{<:Real}, cutoff::Integer, entries::Integer)
     opp_scores = Vector{Float64}(undef, entries)
     Threads.@threads for i = 1:entries
         opp_scores[i] = opp_team_score(players, μ)
@@ -138,7 +138,8 @@ of the opponents in the competition.
 function estimate_opp_stats(players::DataFrame, μ::Vector{<:Real}, Σ::Symmetric{<:Real}, entries::Integer, cutoff::Integer)
     score_draws = Vector{Float64}[]
     order_stats = Float64[]
-    for i = 1:500
+    # Use 100 samples for calculating expectations
+    for i = 1:100
         score_draw = rand(MvNormal(μ, Σ))
         order_stat = compute_order_stat(players, score_draw, cutoff, entries)
         println("$(i) done.")
@@ -161,11 +162,11 @@ end
 Reads players and their correlations from file and generates opponent lineup statistics
 and returns TournyData object.
 """
-function make_tourny_data(entries, cutoff)
-    players = DataFrame(CSV.File("./data/slates/slate_$(Dates.today()).csv"))
+function make_tourny_data(entries::Integer, cutoff::Integer)
+    players = CSV.read("./data/slates/slate_$(Dates.today()).csv", DataFrame)
     μ::Vector{Float64} = players[!, :Projection]
     σ::Vector{Float64} = players[!, :Hist_Std]
-    corr_mat::Matrix{Float64} = Tables.matrix(CSV.File("./data/slates/corr_$(Dates.today()).csv", header=false))
+    corr_mat::Matrix{Float64} = CSV.read("./data/slates/corr_$(Dates.today()).csv", header=false, Tables.matrix)
     # covariance matrix must be positive d so that Distributions.jl MvNormal
     # can do a cholesky factorization on it
     Σ = makeposdef(Symmetric(Diagonal(σ) * corr_mat * Diagonal(σ)))
@@ -198,7 +199,8 @@ function do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAx
     games = unique(data.players.Game)
     teams = unique(data.players.Team)
     positions = unique(data.players.Position)
-    overlap = 4
+    # Setting this to 6 seems to be good
+    overlap = 6
 
     positions_max = Dict(
         "P" => 1,
@@ -457,11 +459,24 @@ end
 Solves tournament optimization problem. Constructs input data, gets lineups, and write them to file.
 """
 function solve_tourny()
-    # Assume competition has 1000 entries, and we want to maximize the probability
-    # of coming first
-    data = make_tourny_data(1000, 1)
-    # Get 50 lineups
-    lineups = get_lineups(data, 50)
+    # Assume competition has 25000 entries, and we want to maximize the probability
+    # of coming in the top 10
+    # This takes about 30 minutes to run
+    data = make_tourny_data(25000, 10)
+    # Ask for number of lineups to generate
+    # This takes ~15 minutes to run
+    num = 0
+    while true
+        print("Enter number of tournament lineups to generate: ")
+        num = readline()
+        try
+            num = parse(Int, num)
+            break
+        catch
+            print("Invalid number entered, try again\n")
+        end
+    end
+    lineups = get_lineups(data, num)
     lineups = [transform_lineup(data, x) for x in lineups]
     write_lineups(lineups)
 end

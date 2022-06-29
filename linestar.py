@@ -3,73 +3,121 @@ import quopri
 import pandas as pd
 import numpy as np
 from os import listdir
+import re
 
 
-def extract_row_data(row):
-    cells = row.find_all("td")
-    return {
-        "Name": cells[5].find(class_="playername").text,
-        "Position": cells[4].text,
-        # Some teams only have two characters, causing an extra space
-        # at the start, so strip that
-        "Team": cells[5].find(class_="playerTeam").text[-3:].strip(),
-        "Salary": cells[9].text,
-        "Scored": cells[10].text,
-        "Projection": cells[11].find("input").get("value"),
-        "Consensus": cells[12].text,
-        "Time": cells[13].text,
-        "Opponent": cells[14].text,
-        "Order": cells[16].text,
-        "Bat/Arm": cells[17].text,
-        "Consistent": cells[18].text,
-        "Floor": cells[19].text,
-        "Ceiling": cells[20].text,
-        "Avg FP": cells[22].text,
-        "Imp Runs": cells[23].text,
-        "pOwn": cells[25].text,
-        "actOwn": cells[26].text,
-        "Leverage": cells[27].text,
-        "Safety": cells[28].text,
-    }
+name_pattern = re.compile(r"\([^()]*\)")
+team_pattern = re.compile(r"[\$,]")
 
 
-def extract_linestar_data(filename):
-    html = open(filename, "r")
+def get_opponent(row):
+    """
+    For full linestar historical data, use the opponent column to
+    determine opposing team and opposing pitcher, if relevant
+    """
+    if "," in row["Opponent"]:
+        opp_pitcher, opp_team = row["Opponent"].split(",")
+        return (opp_team[1:], opp_pitcher)
+    elif "@" in row["Opponent"]:
+        opp_team = row["Opponent"].split("@")[1]
+        return (opp_team, np.nan)
+    elif "vs" in row["Opponent"]:
+        opp_team = row["Opponent"].split("vs")[1][1:]
+        return (opp_team, np.nan)
+
+
+def linestar_hist_full(file):
+    html = open(file, "r")
     html = quopri.decodestring(html.read())
     soup = BeautifulSoup(html, features="html.parser")
 
     table = soup.find_all("table")[0]
-    row_data = []
-    for row in table.find_all("tr", class_="playerCardRow"):
-        row_data.append(extract_row_data(row))
 
-    return pd.DataFrame(row_data)
+    # Find column index numbers for columns we want
+    # This is to avoid issues when columns change between before games and after games
+    header_idx = {
+        "Player": None,
+        "Salary": None,
+        "Opponent": None,
+        "Consensus": None,
+        "Projection": None,
+        "Scored": None,
+        "Order": None,
+        "pOwn": None,
+        "actOwn": None,
+    }
+    # Ignore first columns that have filters etcetera
+    for num, header in enumerate(table.find_all("th")[2:]):
+        if header.text in header_idx.keys():
+            # Position column always in front, so add 1 to index value
+            header_idx[header.text] = num + 1
+
+    data = []
+    rows = table.find_all("tr", class_="playerCardRow")
+    for row in rows:
+        # Ignore first 4 columns that have checkboxes and other things
+        cells = row.find_all("td")[4:]
+        player_data = {
+            "Position": cells[0].text,
+            "Player": name_pattern.sub(
+                "", cells[header_idx["Player"]].find(class_="playername").text
+            ).rstrip(),
+            "Team": cells[header_idx["Player"]].find(class_="playerTeam").text[2:],
+            "Opponent": cells[header_idx["Opponent"]].text,
+            "Salary": int(team_pattern.sub("", cells[header_idx["Salary"]].text)),
+            "Consensus": float(cells[header_idx["Consensus"]].text),
+            "Projection": float(
+                cells[header_idx["Projection"]].find("input").get("value")
+            ),
+            "Scored": float(cells[header_idx["Scored"]].text),
+            "Order": int(cells[header_idx["Order"]].text.replace("-", "0")),
+            "pOwn": float(cells[header_idx["pOwn"]].text.replace("%", "")) / 100,
+            "actOwn": float(cells[header_idx["actOwn"]].text.replace("%", "")) / 100,
+        }
+        data.append(player_data)
+
+    slate = pd.DataFrame(data)
+    # Change players that have multiple listed positions to just the first one
+    slate["Position"] = slate["Position"].str.split("/", expand=True)[0]
+    # C and 1B players can fill the C/1B slot
+    slate["Position"] = slate["Position"].replace({"C": "C/1B", "1B": "C/1B"})
+    # Convert Linestar opponent column into opposing team and opposing pitcher columns
+    slate[["Opp_Team", "Opp_Pitcher"]] = slate.apply(
+        get_opponent, axis=1, result_type="expand"
+    )
+    # For some historical data pages, consensus values are not available and are 0.0
+    # Where this occurs, replace consensus value with projection value
+    slate["Consensus"] = slate["Consensus"].where(
+        slate["Consensus"] != 0, slate["Projection"]
+    )
+    return slate[
+        [
+            "Player",
+            "Position",
+            "Team",
+            "Opp_Team",
+            "Opp_Pitcher",
+            "Salary",
+            "Consensus",
+            "Scored",
+            "Order",
+            "pOwn",
+            "actOwn",
+        ]
+    ]
 
 
 frames = []
 for file in listdir("./data/linestar/"):
     try:
-        frame = extract_linestar_data("./data/linestar/" + file)
+        frame = linestar_hist_full("./data/linestar/" + file)
     except Exception as exception:
         print(f"{file} FAILED")
         print(exception)
         continue
     frame["Date"] = file[:10]
     frames.append(frame)
+    print(f"{file} done.")
 
 data = pd.concat(frames)
-# Remove (R) and (L) from pither names
-data.loc[data["Position"] == "P", "Player"] = data.loc[
-    data["Position"] == "P", "Player"
-].str[:-4]
-data["Salary"] = data["Salary"].replace("[\$,]", "", regex=True).astype(int)
-data["Projection"] = data["Projection"].astype(float)
-data["Scored"] = data["Scored"].astype(float)
-data[["pOwn", "actOwn"]] = (
-    data[["pOwn", "actOwn"]].replace("[\%]", "", regex=True).astype(float)
-)
-data["Position"] = data["Position"].str.split("/", expand=True)[0]
-# Replace players with no batting order with NaN
-data["Order"] = data["Order"].replace({"-": np.nan})
-
-data.to_csv("linestar_data.csv", index=False)
+data.to_csv("./data/linestar_data.csv", index=False)
