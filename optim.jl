@@ -165,11 +165,10 @@ and returns TournyData object.
 function make_tourny_data(entries::Integer, cutoff::Integer)
     players = CSV.read("./data/slates/slate_$(Dates.today()).csv", DataFrame)
     μ::Vector{Float64} = players[!, :Projection]
-    σ::Vector{Float64} = players[!, :Hist_Std]
-    corr_mat::Matrix{Float64} = CSV.read("./data/slates/corr_$(Dates.today()).csv", header=false, Tables.matrix)
-    # covariance matrix must be positive d so that Distributions.jl MvNormal
+    cov_mat::Matrix{Float64} = CSV.read("./data/slates/cov_$(Dates.today()).csv", header=false, Tables.matrix)
+    # covariance matrix must be positive definite so that Distributions.jl MvNormal
     # can do a cholesky factorization on it
-    Σ = makeposdef(Symmetric(Diagonal(σ) * corr_mat * Diagonal(σ)))
+    Σ = makeposdef(Symmetric(cov_mat))
 
     opp_mu, opp_var, opp_cov = estimate_opp_stats(players, μ, Σ, entries, cutoff)
 
