@@ -223,6 +223,8 @@ Computes and writes to file the covariance matrix for today's slate
 function write_cov()
     slate = CSV.read("./data/slates/slate_$(Dates.today()).csv", DataFrame)
     hist = CSV.read("./data/linestar_data.csv", DataFrame)
-    cov = get_cov(100, hist, slate)
-    CSV.write("./data/slates/cov_$(Dates.today()).csv", Tables.table(cov), writeheader=false)
+    cov_mat = get_cov(100, hist, slate)
+    # There are sometimes a few NaN values, replace with 0
+    replace!(cov_mat, NaN => 0.0)
+    CSV.write("./data/slates/cov_$(Dates.today()).csv", Tables.table(cov_mat), writeheader=false)
 end

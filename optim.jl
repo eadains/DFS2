@@ -25,6 +25,13 @@ struct CashData <: OptimData
 end
 
 
+struct BTSData <: OptimData
+    players::DataFrame
+    μ::Vector{<:Real}
+    Σ::Symmetric{<:Real}
+end
+
+
 """
     makeposdef(mat::Symmetric{<:Real})
 
@@ -159,7 +166,7 @@ end
 """
     make_tourny_data()
 
-Reads players and their correlations from file and generates opponent lineup statistics
+Reads players and their covariances from file and generates opponent lineup statistics
 and returns TournyData object.
 """
 function make_tourny_data(entries::Integer, cutoff::Integer)
@@ -188,18 +195,33 @@ end
 
 
 """
-    do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, λ <: Real)
+    make_bts_data()
 
-Constructs and optimizes tournament model using given value of λ.
+Reads players and their covariances from file and returns a BTSData object
+for use in Beat the Score tournaments
+"""
+function make_bts_data()
+    players = CSV.read("./data/slates/slate_$(Dates.today()).csv", DataFrame)
+    μ::Vector{Float64} = players.Projection
+    cov_mat::Matrix{Float64} = CSV.read("./data/slates/cov_$(Dates.today()).csv", header=false, Tables.matrix)
+    # covariance matrix must be positive definite so that Distributions.jl MvNormal
+    # can do a cholesky factorization on it
+    Σ = makeposdef(Symmetric(cov_mat))
+    return BTSData(players, μ, Σ)
+end
+
+
+"""
+    do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, λ::Real, overlap::Integer)
+
+Constructs and optimizes tournament model using given value of λ and overlap constraint
 Returns a tuple where the first element is the lineup vector and the second 
 is the objective value which is the estimated probability that the lineup exceeds opp_mu
 """
-function do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, λ::Real)
+function do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, λ::Real, overlap::Integer)
     games = unique(data.players.Game)
     teams = unique(data.players.Team)
     positions = unique(data.players.Position)
-    # Setting this to 6 seems to be good
-    overlap = 6
 
     positions_max = Dict(
         "P" => 1,
@@ -348,17 +370,112 @@ end
 
 
 """
+    do_optim(data::BTSData, score::Integer)
+
+Does optimization for Beat the Score type tournaments. Score is the cutoff score to be in the money.
+"""
+function do_optim(data::BTSData, score::Integer, λ::Real)
+    games = unique(data.players.Game)
+    teams = unique(data.players.Team)
+    positions = unique(data.players.Position)
+
+    positions_max = Dict(
+        "P" => 1,
+        "C/1B" => 2,
+        "2B" => 2,
+        "3B" => 2,
+        "SS" => 2,
+        "OF" => 4
+    )
+    positions_min = Dict(
+        "P" => 1,
+        "C/1B" => 1,
+        "2B" => 1,
+        "3B" => 1,
+        "SS" => 1,
+        "OF" => 3
+    )
+
+    model = Model(Xpress.Optimizer)
+
+    # Players selected
+    @variable(model, x[data.players.ID], binary = true)
+    # Games selected
+    @variable(model, y[teams], binary = true)
+    # Teams selected
+    @variable(model, z[games], binary = true)
+
+    # Total salary of selected players must be <= $35,000
+    @constraint(model, sum(player.Salary * x[player.ID] for player in eachrow(data.players)) <= 35000)
+
+    # Must select 9 total players
+    @constraint(model, sum(x) == 9)
+
+    for position in positions
+        @constraint(model, positions_min[position] <= sum(x[player.ID] for player in eachrow(data.players) if player.Position == position) <= positions_max[position])
+    end
+
+    for team in teams
+        # Excluding the pitcher, we can select a maximum of 4 players per team
+        @constraint(model, sum(x[player.ID] for player in eachrow(data.players) if player.Team == team && player.Position != "P") <= 4)
+        # If no players are selected from a team, y is set to 0
+        @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(data.players) if player.Team == team))
+    end
+    # Must have players from at least 3 teams
+    @constraint(model, sum(y) >= 3)
+
+    for game in games
+        # If no players are selected from a game z is set to 0
+        @constraint(model, z[game] <= sum(x[player.ID] for player in eachrow(data.players) if player.Game == game))
+    end
+    # Must select players from at least 2 games
+    @constraint(model, sum(z) >= 2)
+
+    mu_x = @expression(model, x.data' * data.μ)
+    var_x = @expression(model, x.data' * data.Σ * x.data)
+    @objective(model, Max, mu_x + λ * var_x)
+
+    optimize!(model)
+    println(termination_status(model))
+    # SCIP only checks for integer values within a tolerance, so round the result to the nearest integer
+    return (round.(Int, value.(x)), 1 - cdf(Normal(), (score - value(mu_x)) / sqrt(value(var_x))))
+end
+
+
+"""
     lambda_max(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray})
 
 Does optimization over range of λ values and returns the lineup with the highest objective function.
 """
-function lambda_max(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray})
+function lambda_max(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, overlap::Integer)
     # I've found that lambdas from around 0 to 0.05 are selected, with strong majority being 0.02
-    lambdas = 0:0.005:0.05
+    lambdas = 0:0.01:0.05
     w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
     # Perform optimization over array of λ values
     Threads.@threads for i in 1:length(lambdas)
-        w_star[i] = do_optim(data, past_lineups, lambdas[i])
+        w_star[i] = do_optim(data, past_lineups, lambdas[i], overlap)
+    end
+
+    # Find lambda value that leads to highest objective function and return its corresponding lineup vector
+    max_index = argmax(x[2] for x in w_star)
+    println("λ max: $(lambdas[max_index])")
+    return w_star[max_index][1]
+end
+
+
+"""
+    lambda_max(data::BTSData, score::Integer)
+
+Does optimization over range of λ values for Beat the Score tournaments
+and returns the lineup with the highest probability of exceeding the cutoff score
+"""
+function lambda_max(data::BTSData, score::Integer)
+    # I've found that lambdas from around 0 to 0.05 are selected, with strong majority being 0.02
+    lambdas = -0.05:0.01:0.05
+    w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
+    # Perform optimization over array of λ values
+    Threads.@threads for i in 1:length(lambdas)
+        w_star[i] = do_optim(data, score, lambdas[i])
     end
 
     # Find lambda value that leads to highest objective function and return its corresponding lineup vector
@@ -374,12 +491,12 @@ end
 Solves the tournament optimization problem with N entries.
 Returns the vector of lineups
 """
-function get_lineups(data::TournyData, N::Integer)
+function get_lineups(data::TournyData, N::Integer, overlap::Integer)
     # A vector of all the lineups we've made so far
     lineups = JuMP.Containers.DenseAxisArray[]
     for n in 1:N
         println(n)
-        lineup = lambda_max(data, lineups)
+        lineup = lambda_max(data, lineups, overlap)
         append!(lineups, Ref(lineup))
     end
 
@@ -453,15 +570,29 @@ end
 
 
 """
+    write_lineups(lineup::Dict{String,String})
+
+Writes Beat the Score lineup to file with expected points
+"""
+function write_lineup(lineup::Dict{String,Union{Missing,String}})
+    open("./BTS_lineup.csv", "w") do file
+        println(file, "Projected Points: $(points)")
+        println(file, "P,C/1B,2B,3B,SS,OF,OF,OF,UTIL")
+        println(file, "$(lineup["P"]),$(lineup["C/1B"]),$(lineup["2B"]),$(lineup["3B"]),$(lineup["SS"]),$(lineup["OF1"]),$(lineup["OF2"]),$(lineup["OF3"]),$(lineup["UTIL"])")
+    end
+end
+
+
+"""
     solve_tourny()
 
 Solves tournament optimization problem. Constructs input data, gets lineups, and write them to file.
 """
 function solve_tourny()
     # Assume competition has 25000 entries, and we want to maximize the probability
-    # of coming in the top 10
+    # of coming in first
     # This takes about 30 minutes to run
-    data = make_tourny_data(25000, 10)
+    data = make_tourny_data(25000, 1)
     # Ask for number of lineups to generate
     # This takes ~15 minutes to run
     num = 0
@@ -475,7 +606,18 @@ function solve_tourny()
             print("Invalid number entered, try again\n")
         end
     end
-    lineups = get_lineups(data, num)
+    overlap = 0
+    while true
+        print("Enter overlap parameter: ")
+        overlap = readline()
+        try
+            overlap = parse(Int, overlap)
+            break
+        catch
+            print("Invalid number entered, try again\n")
+        end
+    end
+    lineups = get_lineups(data, num, overlap)
     lineups = [transform_lineup(data, x) for x in lineups]
     write_lineups(lineups)
 end
@@ -489,6 +631,30 @@ Solves cash game optimization and writes results to file
 function solve_cash()
     data = make_cash_data()
     points, lineup = do_optim(data)
+    lineup = transform_lineup(data, lineup)
+    write_lineup(points, lineup)
+end
+
+
+"""
+    solve_BTS()
+
+Solves Beat the Score optimization and writes results to file
+"""
+function solve_BTS()
+    data = make_bts_data()
+    score = 0
+    while true
+        print("Enter score to beat: ")
+        score = readline()
+        try
+            score = parse(Int, score)
+            break
+        catch
+            print("Invalid number entered, try again\n")
+        end
+    end
+    points, lineup = lambda_max(data, score)
     lineup = transform_lineup(data, lineup)
     write_lineup(points, lineup)
 end

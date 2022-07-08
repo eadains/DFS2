@@ -3,19 +3,17 @@ using CSV
 using Dates
 using Statistics
 using LinearAlgebra
+using JuMP
+using Xpress
 
 
-slate = CSV.read("./data/slates/slate_$(Dates.today()).csv", DataFrame)
-hist = CSV.read("./data/linestar_data.csv", DataFrame)
+struct TournyData
+    players::DataFrame
+    μ::Vector{<:Real}
+    Σ::Symmetric{<:Real}
+end
 
 
-"""
-    makeposdef(mat::Symmetric{<:Real})
-
-Transforms a Symmetric real-valued matrix into a positive definite matrix
-Computes eigendecomposition of matrix, sets negative and zero eigenvalues
-to small value (1e-10) and then reconstructs matrix
-"""
 function makeposdef(mat::Symmetric{<:Real})
     vals = eigvals(mat)
     vecs = eigvecs(mat)
@@ -24,172 +22,141 @@ function makeposdef(mat::Symmetric{<:Real})
 end
 
 
-"""
-    euclid_dist(x::Number, y::Number)
+function do_optim(data::TournyData, past_lineups::Vector{JuMP.Containers.DenseAxisArray}, overlap::Integer)
+    games = unique(data.players.Game)
+    teams = unique(data.players.Team)
+    positions = unique(data.players.Position)
 
-Computes the euclidean distance between two numbers.
-Returns the absolute value of their difference
-"""
-function euclid_dist(x::Number, y::Number)
-    return abs(x - y)
-end
-
-
-"""
-    euclid_dist(x::Tuple{Number, Number}, y::Tuple{Number, Number})
-
-Computes the Euclidean distance between two points in 2d space
-"""
-function euclid_dist(x::Tuple{Number,Number}, y::Tuple{Number,Number})
-    return sqrt((x[1] - y[1])^2 + (x[2] - y[2])^2)
-end
-
-
-"""
-    get_similar_std(num::Integer, hist::DataFrame, player::DataFrameRow)
-
-Using a k-nearest-neighbors-like approach, estimates the standard deviation of scored points
-for a given player.
-
-Given a player, this finds the 'num' number of players that have the closest historical projection
-to the given player and also have the same position and batting order. Returns the standard
-deviation of those players actually scored points.
-"""
-function get_similar_std(num::Integer, hist::DataFrame, player::DataFrameRow)::Float64
-    # TODO: fix dataframes type stability problems
-    # Find players with same position and batting order
-    similar_players = hist[(hist[!, :Position].==player[:Position]).&(hist[!, :Order].==player[:Order]), :]
-    # Form list of tuples where first element is historical points actually scored,
-    # and second element is distance between the historical projection and the current players projection
-    similar_proj = tuple.(
-        similar_players.Scored,
-        euclid_dist.(player.Projection, similar_players.Consensus)
+    positions_max = Dict(
+        "P" => 1,
+        "C/1B" => 2,
+        "2B" => 2,
+        "3B" => 2,
+        "SS" => 2,
+        "OF" => 4
     )
-    # Sort by projection distance
-    sort!(similar_proj, by=x -> x[2])
-    # Return standard deviation of actually scored points from num number of players with the closest
-    # projection to the current player
-    return std([similar_proj[x][1] for x in 1:num])
-end
+    positions_min = Dict(
+        "P" => 1,
+        "C/1B" => 1,
+        "2B" => 1,
+        "3B" => 1,
+        "SS" => 1,
+        "OF" => 3
+    )
 
+    model = Model(Xpress.Optimizer)
 
-"""
-    get_sigma(num::Integer, hist::DataFrame, slate::DataFrame)
+    # Players selected
+    @variable(model, x[data.players.ID], binary = true)
+    # Games selected
+    @variable(model, y[teams], binary = true)
+    # Teams selected
+    @variable(model, z[games], binary = true)
 
-Computes standard deviation vector for given slate.
-'num' parameter controls the 'get_similar_std' function behavior
-"""
-function get_sigma(num::Integer, hist::DataFrame, slate::DataFrame)
-    σ = Vector{Float64}(undef, nrow(slate))
-    for (i, player) in enumerate(eachrow(slate))
-        σ[i] = get_similar_std(num, hist, player)
+    # Total salary of selected players must be <= $35,000
+    @constraint(model, sum(player.Salary * x[player.ID] for player in eachrow(data.players)) <= 35000)
+
+    # Must select 9 total players
+    @constraint(model, sum(x) == 9)
+
+    for position in positions
+        @constraint(model, positions_min[position] <= sum(x[player.ID] for player in eachrow(data.players) if player.Position == position) <= positions_max[position])
     end
-    return σ
-end
 
+    for team in teams
+        # Excluding the pitcher, we can select a maximum of 4 players per team
+        @constraint(model, sum(x[player.ID] for player in eachrow(data.players) if player.Team == team && player.Position != "P") <= 4)
+        # If no players are selected from a team, y is set to 0
+        @constraint(model, y[team] <= sum(x[player.ID] for player in eachrow(data.players) if player.Team == team))
+    end
+    # Must have players from at least 3 teams
+    @constraint(model, sum(y) >= 3)
 
-function same_team_corr(num::Integer, hist::DataFrame, p1::DataFrameRow, p2::DataFrameRow)
-    results = Tuple{Float64,Float64,Float64}[]
-    for date_frame in groupby(hist, :Date)
-        for team_frame in groupby(date_frame, :Team)
-            p1_sim = team_frame[(team_frame.Position.==p1.Position).&(team_frame.Order.==p1.Order), :]
-            p2_sim = team_frame[(team_frame.Position.==p2.Position).&(team_frame.Order.==p2.Order), :]
-            if nrow(p1_sim) == 0 || nrow(p2_sim) == 0
-                # There may be no matching players, so skip
-                continue
-            elseif nrow(p1_sim) > 1 || nrow(p2_sim) > 1
-                # If there are data issues and more than 1 player is found for the above selections, just skip
-                continue
-            else
-                # p1_sim and p2_sim are DataFrame not DataFrameRow so we need to index to get a value instead of a vector
-                # Last element is euclidean distance between historical pair of player's projections and current pair of player's projections
-                push!(results, (p1_sim.Scored[1], p2_sim.Scored[1], euclid_dist((p1.Projection, p2.Projection), (p1_sim.Consensus[1], p2_sim.Consensus[1]))))
-            end
+    for game in games
+        # If no players are selected from a game z is set to 0
+        @constraint(model, z[game] <= sum(x[player.ID] for player in eachrow(data.players) if player.Game == game))
+    end
+    # Must select players from at least 2 games
+    @constraint(model, sum(z) >= 2)
+
+    # If any past lineups have been selected, make sure the current lineup doesn't overlap
+    if length(past_lineups) > 0
+        for past in past_lineups
+            @constraint(model, sum(x .* past) <= overlap)
         end
     end
-    sort!(results, by=x -> x[3])
-    # Sometimes there may be limited samples
-    if length(results) < num
-        num = length(results)
-    elseif length(results) < 10
-        # If there aren't enough samples, return 0
-        return 0.0
-    end
-    return cor([results[x][1] for x in 1:num], [results[x][2] for x in 1:num])
-end
 
+    mu_x = @expression(model, x.data' * data.μ)
+    var_x = @expression(model, x.data' * data.Σ * x.data)
+    @objective(model, Max, mu_x + 0.03 * var_x)
 
-function opp_team_corr(num::Integer, hist::DataFrame, p1::DataFrameRow, p2::DataFrameRow)
-    results = Tuple{Float64,Float64,Float64}[]
-    for date_frame in groupby(hist, :Date)
-        for team_frame in groupby(date_frame, :Team)
-            # Get a similar player 1
-            p1_sim = team_frame[(team_frame.Position.==p1.Position).&(team_frame.Order.==p1.Order), :]
-            # If p1_sim is anything other than exactly 1 row, we need to skip because there is either a data issue
-            # or there are not matching players
-            if nrow(p1_sim) == 1
-                # Get a similar player 2 from the opposing team to p1_sim
-                p2_sim = date_frame[(date_frame.Team.==p1_sim.Opp_Team).&(date_frame.Position.==p2.Position).&(date_frame.Order.==p2.Order), :]
-            else
-                continue
-            end
-            # Similar situation for p2_sim
-            if nrow(p2_sim) == 1
-                # p1_sim and p2_sim are DataFrame not DataFrameRow so we need to index to get a value instead of a vector
-                # Last element is sum of euclidean distances between the two players
-                push!(results, (p1_sim.Scored[1], p2_sim.Scored[1], euclid_dist((p1.Projection, p2.Projection), (p1_sim.Consensus[1], p2_sim.Consensus[1]))))
-            else
-                continue
-            end
-        end
-    end
-    sort!(results, by=x -> x[3])
-    if length(results) < num
-        if length(results) < 10
-            return 0.0
-        else
-            num = length(results)
-        end
-    end
-    return cor([results[x][1] for x in 1:num], [results[x][2] for x in 1:num])
-end
-
-
-function players_corr(num::Integer, hist::DataFrame, p1::DataFrameRow, p2::DataFrameRow)
-    if p1.Team == p2.Team
-        return same_team_corr(num, hist, p1, p2)
-    elseif p1.Opponent == p2.Team
-        return opp_team_corr(num, hist, p1, p2)
+    optimize!(model)
+    println(termination_status(model))
+    if termination_status(model) == JuMP.INFEASIBLE
+        return "INFEASIBLE"
     else
-        return 0.0
+        # SCIP only checks for integer values within a tolerance, so round the result to the nearest integer
+        return round.(Int, value.(x))
     end
 end
 
 
-function get_corr(num::Integer, hist::DataFrame, slate::DataFrame)
-    corr = Matrix{Float64}(undef, nrow(slate), nrow(slate))
+function make_tourny_data(date::String)
+    players = CSV.read("./data/realized_slates/slate_$(date).csv", DataFrame)
+    μ::Vector{Float64} = players.Projection
+    cov_mat::Matrix{Float64} = CSV.read("./data/slates/cov_$(date).csv", header=false, Tables.matrix)
+    # covariance matrix must be positive definite so that Distributions.jl MvNormal
+    # can do a cholesky factorization on it
+    Σ = makeposdef(Symmetric(cov_mat))
+    return TournyData(players, μ, Σ)
+end
 
-    # Iterate over upper triangular portion of matrix, including the diagonal
-    Threads.@threads for i in 1:nrow(slate)
-        for j in i:nrow(slate)
-            if i == j
-                # Diagonal is always 1
-                corr[i, j] = 1
-            else
-                # Otherwise set symmetric correlation entries
-                pair_corr = players_corr(num, hist, slate[i, :], slate[j, :])
-                corr[i, j] = pair_corr
-                corr[j, i] = pair_corr
-            end
+
+function max_score(data::TournyData, lineups::Vector{JuMP.Containers.DenseAxisArray})
+    scores = Vector{Float64}(undef, length(lineups))
+    for (i, lineup) in enumerate(lineups)
+        scores[i] = lineup ⋅ data.players.Scored
+    end
+    return maximum(scores)
+end
+
+
+function overlap_optim(data::TournyData, overlap::Integer)
+    past_lineups = JuMP.Containers.DenseAxisArray[]
+    for n in 1:50
+        println("Overlap: $(overlap) n: $(n)")
+        lineup = do_optim(data, past_lineups, overlap)
+        if lineup == "INFEASIBLE"
+            println("Infeasible overlap constraint")
+            return 0
+        else
+            append!(past_lineups, Ref(lineup))
         end
     end
-    return corr
+    return max_score(data, past_lineups)
 end
 
 
-function get_cov(num::Integer, hist::DataFrame, slate::DataFrame)
-    corr = get_corr(num, hist, slate)
-    σ = get_sigma(num, hist, slate)
-    Σ = Symmetric(Diagonal(σ) * corr * Diagonal(σ))
-    return makeposdef(Σ)
+function max_scoring_overlap(data::TournyData)
+    overlap_scores = Dict{Int64,Float64}()
+    for overlap in 0:9
+        overlap_scores[overlap] = overlap_optim(data, overlap)
+    end
+    return overlap_scores
+end
+
+
+function do_test()
+    dates = ["2022-06-09", "2022-06-10", "2022-06-13", "2022-06-15", "2022-06-16",
+        "2022-06-17", "2022-06-18", "2022-06-20", "2022-06-21", "2022-06-22", "2022-06-24",
+        "2022-06-25", "2022-06-26", "2022-06-28", "2022-06-29", "2022-06-40", "2022-07-01", "2022-07-02", "2022-07-03"]
+    for date in dates
+        println(date)
+        data = make_tourny_data(date)
+        num_games = length(unique(data.players.Game))
+        overlap_scores = max_scoring_overlap(data)
+        open("./data/overlap.csv", "a") do file
+            println(file, "$(date),$(num_games),$(overlap_scores[0]),$(overlap_scores[1]),$(overlap_scores[2]),$(overlap_scores[3]),$(overlap_scores[4]),$(overlap_scores[5]),$(overlap_scores[6]),$(overlap_scores[7]),$(overlap_scores[8]),$(overlap_scores[9])")
+        end
+    end
 end
