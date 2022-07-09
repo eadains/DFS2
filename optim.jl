@@ -146,7 +146,7 @@ function estimate_opp_stats(players::DataFrame, μ::Vector{<:Real}, Σ::Symmetri
     score_draws = Vector{Float64}[]
     order_stats = Float64[]
     # Use 100 samples for calculating expectations
-    for i = 1:100
+    for i = 1:50
         score_draw = rand(MvNormal(μ, Σ))
         order_stat = compute_order_stat(players, score_draw, cutoff, entries)
         println("$(i) done.")
