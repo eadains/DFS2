@@ -1,4 +1,5 @@
 using LinearAlgebra
+using JuMP
 
 
 abstract type Slate end
@@ -38,7 +39,14 @@ end
 
 struct MLBTournyOptimData <: OptimData
     slate::MLBSlate
+    pastlineups::Vector{JuMP.Containers.DenseAxisArray}
+    overlap::Int64
     opp_mu::Float64
     opp_var::Float64
     opp_cov::AbstractVector{Float64}
+end
+
+
+function MLBTournyOptimData(slate, overlap, opp_mu, opp_var, opp_cov)
+    return MLBTournyOptimData(slate, JuMP.Containers.DenseAxisArray[], overlap, opp_mu, opp_var, opp_cov)
 end
