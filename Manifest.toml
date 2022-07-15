@@ -30,6 +30,17 @@ git-tree-sha1 = "19a35467a82e236ff51bc17a3a44b69ef35185a2"
 uuid = "6e34b625-4abd-537c-b88f-471c36dfa7a0"
 version = "1.0.8+0"
 
+[[deps.CEnum]]
+git-tree-sha1 = "eb4cb44a499229b3b8426dcfb5dd85333951ff90"
+uuid = "fa961155-64e5-5f13-b03f-caf6b980ea82"
+version = "0.4.2"
+
+[[deps.CPLEX]]
+deps = ["CEnum", "Libdl", "MathOptInterface", "SparseArrays"]
+git-tree-sha1 = "919740592714cf4750c17ee52ef64aadab203df9"
+uuid = "a076750e-1247-5638-91d2-ce28b192dca0"
+version = "0.9.3"
+
 [[deps.CSV]]
 deps = ["CodecZlib", "Dates", "FilePathsBase", "InlineStrings", "Mmap", "Parsers", "PooledArrays", "SentinelArrays", "Tables", "Unicode", "WeakRefStrings"]
 git-tree-sha1 = "873fb188a4b9d76549b81465b1f75c82aaf59238"
