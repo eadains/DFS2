@@ -1,5 +1,4 @@
 using JuMP
-using GLPK
 using Xpress
 include("types.jl")
 
@@ -10,7 +9,7 @@ include("types.jl")
 Runs optimization for cash games
 """
 function do_optim(data::MLBCashOptimData)
-    model = Model(GLPK.Optimizer)
+    model = Model(Xpress.Optimizer)
 
     # Players selected
     @variable(model, x[[player.ID for player in data.slate.players]], binary = true)
@@ -108,15 +107,15 @@ function do_optim(data::MLBTournyOptimData, λ::Float64)
         end
     end
 
-    mu_x = @expression(model, x.data' * data.slate.μ - data.opp_mu)
-    var_x = @expression(model, x.data' * data.slate.Σ * x.data + data.opp_var - 2 * x.data' * data.opp_cov)
+    mu_x = @expression(model, x.data' * data.slate.μ)
+    var_x = @expression(model, x.data' * data.slate.Σ * x.data)
     # Maximize projected fantasy points
     @objective(model, Max, mu_x + λ * var_x)
 
     optimize!(model)
     println(termination_status(model))
-    # Return optimization result vector, as well as estimated probability of exceeding opponents score
-    return (round.(Int, value.(x)), 1 - cdf(Normal(), -value(mu_x) / sqrt(value(var_x))))
+    # Return optimization result vector, as well as estimated probability of exceeding 250 points
+    return (round.(Int, value.(x)), 1 - cdf(Normal(), (250 - value(mu_x)) / sqrt(value(var_x))))
 end
 
 
@@ -126,8 +125,8 @@ end
 Does optimization over range of λ values and returns the lineup with the highest objective function.
 """
 function lambda_max(data::MLBTournyOptimData)
-    # I've found that lambdas from around 0 to 0.05 are selected, with strong majority being 0.02
-    lambdas = 0:0.01:0.05
+    # I've found that lambdas from around 0 to 0.05 are selected, with strong majority being 0.03
+    lambdas = 0.01:0.01:0.06
     w_star = Vector{Tuple{JuMP.Containers.DenseAxisArray,Float64}}(undef, length(lambdas))
     # Perform optimization over array of λ values
     Threads.@threads for i in 1:length(lambdas)

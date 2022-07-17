@@ -1,4 +1,3 @@
-using Dates
 using Tables
 using CSV
 include("types.jl")
@@ -19,10 +18,15 @@ function makeposdef(mat::Symmetric{<:Real})
 end
 
 
-function get_mlb_slate()
-    players = CSV.read("./data/slates/slate_$(Dates.today()).csv", Tables.rowtable)
+"""
+    get_mlb_slate(date::String)
+
+Constructs MLBSlate given a date.
+"""
+function get_mlb_slate(date::String)
+    players = CSV.read("./data/slates/slate_$(date).csv", Tables.rowtable)
     μ = [player.Projection for player in players]
-    Σ = makeposdef(Symmetric(CSV.read("./data/slates/cov_$(Dates.today()).csv", header=false, Tables.matrix)))
+    Σ = makeposdef(Symmetric(CSV.read("./data/slates/cov_$(date).csv", header=false, Tables.matrix)))
     games = unique([player.Game for player in players])
     teams = unique([player.Team for player in players])
     return MLBSlate(players, games, teams, μ, Σ)

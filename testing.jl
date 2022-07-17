@@ -9,18 +9,13 @@ function emax(mu_x1, mu_x2, var_x1, var_x2, cov)
 end
 
 
-function get_mlb_slate()
-    players = CSV.read("./data/slates/slate_2022-07-13.csv", Tables.rowtable)
-    μ = [player.Projection for player in players]
-    Σ = makeposdef(Symmetric(CSV.read("./data/slates/cov_2022-07-13.csv", header=false, Tables.matrix)))
-    games = unique([player.Game for player in players])
-    teams = unique([player.Team for player in players])
-    return MLBSlate(players, games, teams, μ, Σ)
-end
-
-
 function do_optim(slate::MLBSlate, cuts::Vector{JuMP.Containers.DenseAxisArray})
-    model = Model(() -> Xpress.Optimizer(logfile="optimlog.log", HEUREMPHASIS=1, MIPRELSTOP=0.25))
+    model = Model(CPLEX.Optimizer)
+    set_optimizer_attribute(model, "CPXPARAM_MIP_Display", 1)
+    set_optimizer_attribute(model, "CPXPARAM_ScreenOutput", 1)
+    set_optimizer_attribute(model, "CPXPARAM_Emphasis_MIP", 5)
+    set_optimizer_attribute(model, "CPXPARAM_MIP_Strategy_Probe", 2)
+    set_optimizer_attribute(model, "CPXPARAM_MIP_Tolerances_MIPGap", 0.10)
 
     # The 2 different lineups are along axis 1
     # Players selected
@@ -62,7 +57,7 @@ function do_optim(slate::MLBSlate, cuts::Vector{JuMP.Containers.DenseAxisArray})
     end
 
     for cut in cuts
-        @constraint(model, sum(cut .* x) <= 6)
+        @constraint(model, sum(cut .* x) <= 17)
     end
 
     mu_x1 = @expression(model, x.data[1, :]' * slate.μ)
@@ -86,7 +81,7 @@ function do_optim(slate::MLBSlate, cuts::Vector{JuMP.Containers.DenseAxisArray})
 end
 
 
-slate = get_mlb_slate()
+slate = get_mlb_slate("2022-07-16")
 
 LB = -Inf
 UB = Inf
@@ -122,7 +117,10 @@ end
 
 function find_thetasq_upper_bound(slate)
     # Run for maximum three minutes
-    model = Model(() -> Xpress.Optimizer(logfile="optimlog.log", HEUREMPHASIS=1, MAXTIME=180))
+    model = Model(CPLEX.Optimizer)
+    set_optimizer_attribute(model, "CPXPARAM_MIP_Display", 4)
+    set_optimizer_attribute(model, "CPXPARAM_ScreenOutput", 1)
+    set_optimizer_attribute(model, "CPXPARAM_TimeLimit", 180)
 
     # The 2 different lineups are along axis 1
     # Players selected
@@ -191,7 +189,8 @@ end
 
 function find_delta_upper_bound(slate)
     # Run for maximum three minutes
-    model = Model(() -> Xpress.Optimizer(logfile="optimlog.log", HEUREMPHASIS=1, MAXTIME=180))
+    model = Model(CPLEX.Optimizer)
+    set_optimizer_attribute(model, "CPXPARAM_MIP_Display", 0)
 
     # The 2 different lineups are along axis 1
     # Players selected
@@ -300,9 +299,11 @@ delta_upper_bound = find_delta_upper_bound(slate)
 delta_intervals = make_delta_intervals(delta_upper_bound, 100)
 cdf_constants = make_cdf_constants(theta_lower_intervals, delta_intervals)
 
-# Run for maximum three minutes
-#model = Model(() -> Xpress.Optimizer(logfile="optimlog.log", HEUREMPHASIS=1, MAXTIME=180))
-model = Model(() -> CPLEX.Optimizer(CPXPARAM_MIP_Display=1, CPXPARAM_ScreenOutput=1, CPXPARAM_TimeLimit=180))
+model = Model(CPLEX.Optimizer)
+set_optimizer_attribute(model, "CPXPARAM_MIP_Display", 4)
+set_optimizer_attribute(model, "CPXPARAM_ScreenOutput", 1)
+set_optimizer_attribute(model, "CPXPARAM_Emphasis_MIP", 3)
+# set_optimizer_attribute(model, "CPXPARAM_TimeLimit", 180)
 
 # The 2 different lineups are along axis 1
 # Players selected
@@ -372,7 +373,7 @@ s_prime = @expression(model, sum(theta_upper_intervals[q] * w[q] for q in 1:100)
 
 for q in 1:100
     for k in 1:100
-        @constraint(model, u_prime <= mu_x1 * cdf_constants[q, k] + mu_x2 * (1 - cdf_constants[q, k]) + 100 * (2 - w[q] - r[k]))
+        @constraint(model, u_prime <= mu_x1 * cdf_constants[q, k] + mu_x2 * (1 - cdf_constants[q, k]) + 250 * (2 - w[q] - r[k]))
     end
 end
 

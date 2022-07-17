@@ -1,3 +1,4 @@
+using Dates
 include("opp_teams.jl")
 include("optim.jl")
 include("types.jl")
@@ -9,7 +10,7 @@ include("io.jl")
 Solves cash optimization and writes results to file
 """
 function solve_cash()
-    slate = get_mlb_slate()
+    slate = get_mlb_slate("$(Dates.today())")
     points, lineup = do_optim(MLBCashOptimData(slate))
     lineup = transform_lineup(slate, lineup)
     write_lineup(points, lineup)
@@ -21,19 +22,7 @@ end
 Solves tournament optimization and writes results to file
 """
 function solve_tourny()
-    slate = get_mlb_slate()
-    num = 0
-    while true
-        print("Enter number samples to use for opponent statistics: ")
-        num = readline()
-        try
-            num = parse(Int, num)
-            break
-        catch
-            print("Invalid number entered, try again\n")
-        end
-    end
-    opp_mu, opp_var, opp_cov = estimate_opp_stats(slate, 25000, 10, num)
+    slate = get_mlb_slate("$(Dates.today())")
 
     overlap = 0
     while true
@@ -46,7 +35,7 @@ function solve_tourny()
             print("Invalid number entered, try again\n")
         end
     end
-    data = MLBTournyOptimData(slate, overlap, opp_mu, opp_var, opp_cov)
+    data = MLBTournyOptimData(slate, overlap)
 
     num = 0
     while true
