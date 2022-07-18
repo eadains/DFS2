@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from difflib import get_close_matches
 from datetime import datetime
+import os
 
 
 def opp_pitcher(x):
@@ -10,7 +11,7 @@ def opp_pitcher(x):
         return np.nan
 
     series = slate.loc[
-        (slate["Team"] == x["Opponent"]) & (slate["Position"] == "P"), "Id"
+        (slate["Team"] == x["Opponent"]) & (slate["Position"] == "P"), "ID"
     ]
     # Error if no opposing pitcher is found
     if len(series) == 0:
@@ -30,79 +31,85 @@ def close_matches(x, possible):
         return np.nan
 
 
-# FantasyData projection slate
-slate = pd.read_csv("./data/slate.csv")
-# Drop any players that have any kind of injury indicator
-slate = slate[slate["Injury Indicator"].isna()]
-# Drop non-starting pitchers
-slate = slate.drop(
-    slate[(slate["Position"] == "P") & (slate["Probable Pitcher"].isna())].index
-)
-# For players that play multiple positions, assume they only play the first listed
-# Because of the UTIL slot, I assume this has little impact on optimality
-# TODO: Refactor optimization to account for multiple position players
-slate["Position"] = slate["Position"].str.split("/", expand=True)[0]
-# Convert C and 1B position players to C/1B position
-slate["Position"] = slate["Position"].replace({"C": "C/1B", "1B": "C/1B"})
-# Get opposing pitchers for each player
-slate["Opp_Pitcher"] = slate.apply(opp_pitcher, axis=1)
-slate = slate[
-    ["Nickname", "Id", "Position", "Salary", "Game", "Team", "Opponent", "Opp_Pitcher"]
-]
+def make_game(row):
+    if row["HomeOrAway"] == "HOME":
+        return f"{row['Opponent']}@{row['Team']}"
+    elif row["HomeOrAway"] == "AWAY":
+        return f"{row['Team']}@{row['Opponent']}"
 
 
-proj = pd.concat(
+slate = pd.read_csv("./data/fanduel.csv")
+players = pd.concat(
     [pd.read_csv("./data/pitchers.csv"), pd.read_csv("./data/batters.csv")]
 )
-# Match names in projection data to slate data
-proj["Name"] = proj["Name"].apply(lambda x: close_matches(x, slate["Nickname"]))
-# Drop players with non-matching names
-proj = proj.dropna(subset="Name")
-proj = proj[["Name", "Team", "BattingOrder", "FantasyPointsFanDuel"]]
+players["Game"] = players.apply(make_game, axis=1)
 
-
-slate = slate.merge(
-    proj, left_on=["Nickname", "Team"], right_on=["Name", "Team"], how="left"
-)
-# Only consider players with >0 projections
-slate = slate[slate["FantasyPointsFanDuel"] > 0]
-# Drop non-pitchers with no batting order
-slate = slate.drop(
-    slate[(slate["Position"] != "P") & (slate["BattingOrder"].isna())].index
-)
-# Set pitchers to have 0 batting order
-slate.loc[slate["Position"] == "P", "BattingOrder"] = 0
-# Change batting order and salary to integer
-slate["BattingOrder"] = slate["BattingOrder"].astype(int)
-slate["Salary"] = slate["Salary"].astype(int)
+slate = slate.merge(players, on=["Name", "Team", "Opponent"], how="left")
+# FantasyData updates any players that aren't starting pitchers or batters to 0 projection
+# so this removes any players we never want to pick
+slate = slate[slate["FantasyPointsFanDuel_x"] > 0]
 slate = slate[
     [
         "Name",
-        "Id",
-        "Position",
-        "Salary",
+        "Position_x",
+        "OperatorSalary",
         "Game",
         "Team",
         "Opponent",
         "BattingOrder",
-        "Opp_Pitcher",
-        "FantasyPointsFanDuel",
+        "FantasyPointsFanDuel_x",
     ]
 ]
 slate.columns = [
     "Name",
-    "ID",
     "Position",
     "Salary",
     "Game",
     "Team",
     "Opponent",
     "Order",
-    "Opp_Pitcher",
     "Projection",
+]
+
+fd_slate = pd.read_csv("./data/slate.csv")
+fd_slate["Nickname"] = fd_slate["Nickname"].apply(
+    lambda x: close_matches(x, slate["Name"])
+)
+fd_slate = fd_slate.rename(columns={"Nickname": "Name"})
+
+# Possible Issue here: two players having the same name and same salary
+# Can't join on Team because FantasyData uses different team abbreviations
+# We need the FanDuel slate information only for the IDs for CSV import
+slate = slate.merge(fd_slate[["Name", "Id", "Salary"]], how="left")
+slate = slate.rename(columns={"Id": "ID"})
+slate["Opp_Pitcher"] = slate.apply(opp_pitcher, axis=1)
+slate.loc[slate["Order"].isna(), "Order"] = 0
+slate["Order"] = slate["Order"].astype(int)
+# C and 1B players can fill the C/1B slot
+slate["Position"] = slate["Position"].replace({"C": "C/1B", "1B": "C/1B"})
+
+slate = slate[
+    [
+        "Name",
+        "ID",
+        "Position",
+        "Salary",
+        "Game",
+        "Team",
+        "Opponent",
+        "Order",
+        "Opp_Pitcher",
+        "Projection",
+    ]
 ]
 
 # Write to csv with todays date
 slate.to_csv(
     f"./data/slates/slate_{datetime.today().strftime('%Y-%m-%d')}.csv", index=False
 )
+
+# Remove files after writing slate so errors are raised if they aren't updated
+os.remove("./data/slate.csv")
+os.remove("./data/batters.csv")
+os.remove("./data/pitchers.csv")
+os.remove("./data/fanduel.csv")
